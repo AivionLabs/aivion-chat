@@ -1,3 +1,5 @@
+const aivionWorkflow = require('./aivion/workflow');
+const aivionCleanup = require('./aivion/cleanup');
 const accessPermissions = require('./accessPermissions');
 const assistants = require('./assistants');
 const categories = require('./categories');
@@ -68,4 +70,6 @@ module.exports = {
   categories,
   staticRoute,
   accessPermissions,
+  aivionWorkflow,
+  aivionCleanup,
 };

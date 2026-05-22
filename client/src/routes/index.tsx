@@ -10,6 +10,7 @@ import {
 } from '~/components/Auth';
 import { MarketplaceProvider } from '~/components/Agents/MarketplaceContext';
 import AgentMarketplace from '~/components/Agents/Marketplace';
+import ConnectionsPage from '~/components/Aivion/Connections/ConnectionsPage';
 import { OAuthSuccess, OAuthError } from '~/components/OAuth';
 import { AuthContextProvider } from '~/hooks/AuthContext';
 import RouteErrorBoundary from './RouteErrorBoundary';
@@ -35,6 +36,26 @@ const loadInlinePromptsView = () =>
 
 const loadSkillsView = () =>
   import('~/components/Skills/layouts/SkillsView').then((m) => ({
+    Component: m.default,
+  }));
+
+const loadWorkflowView = () =>
+  import('~/components/Aivion/Workflow/WorkflowLayout').then((m) => ({
+    Component: m.default,
+  }));
+
+const loadWorkflowList = () =>
+  import('~/components/Aivion/Workflow/WorkflowList').then((m) => ({
+    Component: m.default,
+  }));
+
+const loadWorkflowDetail = () =>
+  import('~/components/Aivion/Workflow/WorkflowDetail').then((m) => ({
+    Component: m.default,
+  }));
+
+const loadWorkflowRun = () =>
+  import('~/components/Aivion/Workflow/WorkflowRun').then((m) => ({
     Component: m.default,
   }));
 
@@ -160,6 +181,28 @@ export const router = createBrowserRouter(
                   <AgentMarketplace />
                 </MarketplaceProvider>
               ),
+            },
+            {
+              path: 'workflow',
+              lazy: loadWorkflowView,
+              children: [
+                {
+                  index: true,
+                  lazy: loadWorkflowList,
+                },
+                {
+                  path: ':id',
+                  lazy: loadWorkflowDetail,
+                },
+                {
+                  path: ':id/runs/:runId',
+                  lazy: loadWorkflowRun,
+                },
+              ],
+            },
+            {
+              path: 'connections',
+              element: <ConnectionsPage />,
             },
           ],
         },

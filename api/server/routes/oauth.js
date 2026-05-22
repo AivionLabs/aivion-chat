@@ -98,13 +98,24 @@ router.get('/openid', (req, res, next) => {
   })(req, res, next);
 });
 
-router.get(
-  '/openid/callback',
-  passport.authenticate('openid', {
-    failureRedirect: `${domains.client}/oauth/error`,
-    failureMessage: true,
-    session: false,
-  }),
+router.get('/openid/callback', (req, res, next) => {
+  passport.authenticate('openid', { session: false }, (err, user, info) => {
+    if (err) {
+      logger.error('[openid/callback] token exchange failed', {
+        message: err.message,
+        oauthError: err.cause ? JSON.stringify(err.cause) : 'none',
+        httpStatus: err.status,
+      });
+      return res.redirect(`${domains.client}/oauth/error`);
+    }
+    if (!user) {
+      logger.warn('[openid/callback] no user returned', { info });
+      return res.redirect(`${domains.client}/oauth/error`);
+    }
+    req.user = user;
+    next();
+  })(req, res, next);
+},
   setBalanceConfig,
   checkDomainAllowed,
   oauthHandler,
