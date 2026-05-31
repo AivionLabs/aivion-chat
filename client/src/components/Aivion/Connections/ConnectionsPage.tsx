@@ -85,11 +85,14 @@ export default function ConnectionsPage() {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!r.ok) throw new Error(`${r.status}`);
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.detail ?? `HTTP ${r.status}`);
+      }
       const { auth_url } = await r.json();
       window.location.href = auth_url;
-    } catch {
-      setError('Failed to start OAuth flow. Please try again.');
+    } catch (err) {
+      setError(`Failed to start OAuth flow: ${err instanceof Error ? err.message : 'Please try again.'}`);
       setConnecting(null);
     }
   }

@@ -102,7 +102,16 @@ const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplay
 
   const content = useMemo(() => {
     if (!isCreatedByUser) {
-      return <Markdown content={text} isLatestMessage={isLatestMessage} />;
+      // Strip intermediate Aivion cost footers — keep only the last one.
+      // Multiple footers appear when the agent makes several LLM calls (planning + response).
+      const footerMarker = '\n\n---\n💰 **Cost:**';
+      const firstIdx = text.indexOf(footerMarker);
+      const lastIdx = text.lastIndexOf(footerMarker);
+      const displayText =
+        firstIdx !== -1 && firstIdx !== lastIdx
+          ? text.slice(0, firstIdx) + text.slice(lastIdx)
+          : text;
+      return <Markdown content={displayText} isLatestMessage={isLatestMessage} />;
     }
     if (enableUserMsgMarkdown) {
       return <MarkdownLite content={text} />;

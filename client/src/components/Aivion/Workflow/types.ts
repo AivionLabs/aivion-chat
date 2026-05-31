@@ -23,9 +23,49 @@ export type WorkflowOutputField = {
   kind?: 'text' | 'list';
 };
 
+export type MetricItem = {
+  label: string;
+  value: string;
+  format?: 'currency' | 'number' | 'percent' | 'text';
+};
+
+export type TableColumn = {
+  field: string;
+  label: string;
+  format?: 'currency' | 'number' | 'percent' | 'text';
+};
+
+export type ComparisonField = {
+  field: string;
+  label: string;
+  kind?: 'text' | 'list';
+};
+
+export type TimelineItem = {
+  date: string;
+  event: string;
+  description?: string;
+};
+
+export type ProgressItem = {
+  label: string;
+  status: 'completed' | 'running' | 'pending' | 'warning' | 'failed';
+  details?: string;
+};
+
 export type WorkflowOutputSection =
-  | { type: 'key_value'; title?: string; fields: WorkflowOutputField[] }
-  | { type: 'list'; title?: string; items: string[] };
+  | { type: 'key_value';        title?: string; fields: WorkflowOutputField[] }
+  | { type: 'list';             title?: string; items: string[] }
+  | { type: 'text';             title?: string; content: string }
+  | { type: 'metric_grid';      title?: string; metrics: MetricItem[] }
+  | { type: 'table';            title?: string; data_table: string; columns: TableColumn[] }
+  | { type: 'comparison';       title?: string; data: string; fields_per_item: ComparisonField[] }
+  | { type: 'bar_chart';        title?: string; chart_data: string; x_field: string; y_field: string }
+  | { type: 'line_chart';       title?: string; chart_data: string; x_field: string; y_field: string }
+  | { type: 'pie_chart';        title?: string; chart_data: string; label_field: string; value_field: string }
+  | { type: 'document_preview'; title?: string; storage_key: string; filename?: string }
+  | { type: 'timeline';         title?: string; timeline_items: TimelineItem[] }
+  | { type: 'progress';         title?: string; progress_items: ProgressItem[] };
 
 export type WorkflowOutput =
   | { type: 'report'; title?: string; sections: WorkflowOutputSection[] }
@@ -87,6 +127,17 @@ export type RunStatus =
   | 'failed'
   | 'cancelled';
 
+export type CandidateReviewField = {
+  key: string;
+  label: string;
+};
+
+export type CandidateReviewSchema = {
+  type: 'candidate_review_form';
+  iterations: Record<string, unknown>[];
+  fields_per_candidate: CandidateReviewField[];
+};
+
 export type WorkflowRun = {
   run_id: string;
   workflow_id: string;
@@ -96,9 +147,17 @@ export type WorkflowRun = {
   error_message?: string | null;
   pending_step_id?: string | null;
   pending_prompt?: string | null;
-  pending_input_schema?: { type: string; fields: WorkflowInputField[] } | null;
+  pending_input_schema?: { type: string; fields: WorkflowInputField[] } | CandidateReviewSchema | null;
   started_at?: string | null;
   completed_at?: string | null;
   created_at?: string | null;
   expires_at?: string | null;
+};
+
+export type WorkflowReviewProps = {
+  run: WorkflowRun;
+  workflow: Workflow | null;
+  runId: string;
+  token: string;
+  onResumed: () => void;
 };

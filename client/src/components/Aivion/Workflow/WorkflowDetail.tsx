@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { useAuthContext } from '~/hooks/AuthContext';
 import type { Workflow, WorkflowInputField } from './types';
@@ -84,6 +84,149 @@ function FileInput({
   );
 }
 
+// ── FileArrayInput ────────────────────────────────────────────────────────────
+
+type UploadItem = {
+  id: string;
+  name: string;
+  status: 'uploading' | 'done' | 'error';
+  storageKey?: string;
+};
+
+function FileArrayInput({
+  field,
+  onChange,
+  showValidation,
+  token,
+}: {
+  field: WorkflowInputField;
+  onChange: (name: string, value: string) => void;
+  showValidation?: boolean;
+  token: string | undefined;
+}) {
+  const maxFiles = field.max_files ?? 10;
+  const [items, setItems] = useState<UploadItem[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const doneCount = items.filter((i) => i.status === 'done').length;
+  const activeCount = items.filter((i) => i.status !== 'error').length;
+  const showMissing = showValidation && doneCount === 0;
+  const atMax = activeCount >= maxFiles;
+
+  useEffect(() => {
+    const keys = items.filter((i) => i.status === 'done').map((i) => i.storageKey!);
+    onChangeRef.current(field.name, JSON.stringify(keys));
+  }, [items, field.name]);
+
+  const uploadFile = useCallback(async (file: File) => {
+    const id = Math.random().toString(36).slice(2);
+    setItems((prev) => [...prev, { id, name: file.name, status: 'uploading' }]);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('/api/aivion/workflow/uploads', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const { storage_key } = await res.json();
+      setItems((prev) => prev.map((item) => item.id === id ? { ...item, status: 'done', storageKey: storage_key } : item));
+    } catch {
+      setItems((prev) => prev.map((item) => item.id === id ? { ...item, status: 'error' } : item));
+    }
+  }, [token]);
+
+  function handleFiles(files: FileList | File[]) {
+    const remaining = maxFiles - activeCount;
+    Array.from(files).slice(0, remaining).forEach((f) => void uploadFile(f));
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {!atMax && (
+        <label
+          className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-6 text-center transition-colors ${
+            dragging
+              ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20'
+              : showMissing
+                ? 'border-red-400'
+                : 'border-border-light hover:border-amber-400 hover:bg-amber-50/50 dark:hover:bg-amber-900/10'
+          }`}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => { e.preventDefault(); setDragging(false); if (e.dataTransfer.files) handleFiles(e.dataTransfer.files); }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-text-tertiary" aria-hidden>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <div>
+            <p className="text-sm font-medium text-text-primary">
+              {dragging ? 'Drop files here' : 'Click or drag CVs here'}
+            </p>
+            <p className="text-xs text-text-tertiary">PDF or DOCX · up to {maxFiles} files · max 10 MB each</p>
+          </div>
+          <input
+            type="file"
+            multiple
+            accept={field.accept ?? '.pdf,.docx'}
+            className="sr-only"
+            onChange={(e) => { if (e.target.files) handleFiles(e.target.files); e.currentTarget.value = ''; }}
+          />
+        </label>
+      )}
+
+      {items.length > 0 && (
+        <ul className="space-y-1.5">
+          {items.map((item) => (
+            <li key={item.id} className="flex items-center gap-2.5 rounded-lg border border-border-light bg-surface-secondary px-3 py-2">
+              {item.status === 'uploading' ? (
+                <svg className="h-4 w-4 shrink-0 animate-spin text-amber-500" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                  <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : item.status === 'done' ? (
+                <svg className="h-4 w-4 shrink-0 text-green-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg className="h-4 w-4 shrink-0 text-red-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+              )}
+              <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-primary">{item.name}</span>
+              <span className="shrink-0 text-xs text-text-tertiary">
+                {item.status === 'uploading' ? 'Uploading…' : item.status === 'error' ? 'Failed' : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => setItems((prev) => prev.filter((i) => i.id !== item.id))}
+                className="shrink-0 rounded p-0.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary"
+                aria-label="Remove file"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex items-center justify-between">
+        {showMissing
+          ? <p className="text-xs text-red-500">Please upload at least one file</p>
+          : <span />}
+        {items.length > 0 && (
+          <p className="text-xs text-text-tertiary">{doneCount} / {maxFiles} uploaded</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── FormField ─────────────────────────────────────────────────────────────────
 
 const inputBase =
@@ -105,27 +248,42 @@ function FormField({
   if (field.type === 'file') {
     return <FileInput field={field} onChange={onChange} showValidation={showValidation} token={token} />;
   }
+  if (field.type === 'file_array') {
+    return <FileArrayInput field={field} onChange={onChange} showValidation={showValidation} token={token} />;
+  }
+
+  const showError = showValidation && field.required && !value.trim();
+  const errorClass = showError ? 'border-red-400 focus:ring-red-400/50' : '';
+  const cls = `${inputBase} ${errorClass}`;
+
+  let input: React.ReactNode;
   if (field.type === 'select' && field.options) {
-    return (
-      <select className={inputBase} value={value} onChange={(e) => onChange(field.name, e.target.value)}>
+    input = (
+      <select className={cls} value={value} onChange={(e) => onChange(field.name, e.target.value)}>
         <option value="">Select…</option>
         {field.options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     );
-  }
-  if (field.type === 'text') {
-    return (
-      <textarea rows={3} className={`${inputBase} resize-y`} value={value} onChange={(e) => onChange(field.name, e.target.value)} placeholder={field.placeholder} />
+  } else if (field.type === 'text') {
+    input = (
+      <textarea rows={3} className={`${cls} resize-y`} value={value} onChange={(e) => onChange(field.name, e.target.value)} placeholder={field.placeholder} />
     );
-  }
-  if (field.type === 'boolean') {
-    return (
+  } else if (field.type === 'boolean') {
+    input = (
       <input type="checkbox" className="h-4 w-4 rounded" checked={value === 'true'} onChange={(e) => onChange(field.name, String(e.target.checked))} />
     );
+  } else {
+    const typeMap: Record<string, string> = { string: 'text', email: 'email', number: 'number', date: 'date' };
+    input = (
+      <input type={typeMap[field.type] ?? 'text'} className={cls} value={value} onChange={(e) => onChange(field.name, e.target.value)} placeholder={field.placeholder} />
+    );
   }
-  const typeMap: Record<string, string> = { string: 'text', email: 'email', number: 'number', date: 'date' };
+
   return (
-    <input type={typeMap[field.type] ?? 'text'} className={inputBase} value={value} onChange={(e) => onChange(field.name, e.target.value)} placeholder={field.placeholder} />
+    <div className="flex flex-col gap-1">
+      {input}
+      {showError && <p className="text-xs text-red-500">This field is required</p>}
+    </div>
   );
 }
 
@@ -168,7 +326,7 @@ export default function WorkflowDetail() {
         const wf = detail ?? fromList;
         if (wf) {
           const init: Record<string, string> = {};
-          for (const f of wf.spec?.inputs ?? []) init[f.name] = '';
+          for (const f of wf.spec?.inputs ?? []) init[f.name] = f.type === 'file_array' ? '[]' : '';
           setValues(init);
         }
         if (detail && fromList) {
@@ -236,8 +394,14 @@ export default function WorkflowDetail() {
 
   async function handleStart(e: React.FormEvent) {
     e.preventDefault();
-    const missingFile = inputs.some((f) => f.required && f.type === 'file' && !valuesRef.current[f.name]);
-    if (missingFile) { setShowValidation(true); return; }
+    const missingRequired = inputs.some((f) => {
+      if (!f.required) return false;
+      const v = valuesRef.current[f.name] ?? '';
+      if (f.type === 'file') return !v;
+      if (f.type === 'file_array') { try { return (JSON.parse(v) as string[]).length === 0; } catch { return true; } }
+      return !v.trim();
+    });
+    if (missingRequired) { setShowValidation(true); return; }
     setSubmitting(true);
     setStartError(null);
     const parsed: Record<string, unknown> = {};
@@ -245,6 +409,7 @@ export default function WorkflowDetail() {
       const v = valuesRef.current[f.name] ?? '';
       if (f.type === 'number') parsed[f.name] = v === '' ? null : Number(v);
       else if (f.type === 'boolean') parsed[f.name] = v === 'true';
+      else if (f.type === 'file_array') { try { parsed[f.name] = JSON.parse(v); } catch { parsed[f.name] = []; } }
       else parsed[f.name] = v;
     }
     try {
@@ -296,19 +461,19 @@ export default function WorkflowDetail() {
   }
 
   return (
-    <div className="min-h-full p-6 lg:p-10">
+    <div className="flex h-full flex-col overflow-hidden p-6 lg:p-10">
       {/* Back */}
-      <Link to="/workflow" className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary">
+      <Link to="/workflow" className="inline-flex shrink-0 items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
           <path d="m15 18-6-6 6-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         My Workflows
       </Link>
 
-      <div className="mt-6 flex flex-col gap-8 lg:flex-row lg:gap-12">
+      <div className="mt-6 flex min-h-0 flex-1 flex-col gap-8 overflow-y-auto lg:flex-row lg:overflow-hidden lg:gap-12">
 
         {/* ── Left: info + pipeline ── */}
-        <div className="lg:w-72 lg:shrink-0">
+        <div className="lg:w-56 lg:shrink-0 lg:overflow-y-auto">
           <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -388,7 +553,7 @@ export default function WorkflowDetail() {
         <div className="hidden w-px self-stretch bg-border-light lg:block" />
 
         {/* ── Right: form or loader ── */}
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 pb-4 lg:overflow-y-auto lg:pb-0">
           {activeRunId ? (
             /* Pipeline is running — show current step loader */
             <div className="flex flex-col items-center justify-center gap-5 py-20">
@@ -453,7 +618,7 @@ export default function WorkflowDetail() {
 
                 <div className="grid grid-cols-2 gap-4">
                   {inputs.map((f) => (
-                    <div key={f.name} className={f.type === 'text' || f.type === 'file' ? 'col-span-2' : 'col-span-1 max-sm:col-span-2'}>
+                    <div key={f.name} className={f.type === 'text' || f.type === 'file' || f.type === 'file_array' ? 'col-span-2' : 'col-span-1 max-sm:col-span-2'}>
                       <label className="mb-1.5 block text-sm font-medium text-text-primary">
                         {f.label}
                         {f.required && <span className="ml-1 text-red-500">*</span>}

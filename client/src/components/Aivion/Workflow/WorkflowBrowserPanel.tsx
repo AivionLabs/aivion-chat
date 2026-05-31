@@ -237,12 +237,48 @@ export default function WorkflowBrowserPanel() {
           <div className="flex-1 overflow-y-auto px-3 pb-3">
             <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">Inputs</p>
             <div className="space-y-2.5">
-              {inputEntries.map(([key, value]) => (
-                <div key={key}>
-                  <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
-                  <p className="mt-0.5 text-xs font-medium text-text-primary leading-snug">{String(value)}</p>
-                </div>
-              ))}
+              {inputEntries.map(([key, value]) => {
+                const strVal = String(value);
+                const isFile = /\.(pdf|docx?|txt|csv|xlsx?)$/i.test(strVal) || strVal.startsWith('uploads/');
+                const isSkill = /skill|tech|stack|technolog/i.test(key);
+                if (isFile) {
+                  const fileName = strVal.split('/').pop() ?? strVal;
+                  const display = fileName.length > 22 ? fileName.slice(0, 9) + '…' + fileName.slice(-9) : fileName;
+                  return (
+                    <div key={key}>
+                      <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
+                      <div className="mt-0.5 flex items-center gap-1.5 rounded-md border border-border-light bg-surface-secondary px-2 py-1">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" className="shrink-0 text-text-secondary" aria-hidden>
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                          <polyline points="14 2 14 8 20 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        <span className="truncate text-[10px] font-medium text-text-secondary">{display}</span>
+                      </div>
+                    </div>
+                  );
+                }
+                if (isSkill) {
+                  const skills = strVal.split(/[\s,]+/).filter(Boolean);
+                  return (
+                    <div key={key}>
+                      <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {skills.map((skill) => (
+                          <span key={skill} className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                            {skill}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div key={key}>
+                    <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
+                    <p className="mt-0.5 text-xs font-medium leading-snug text-text-primary">{strVal}</p>
+                  </div>
+                );
+              })}
             </div>
           </div>
         ) : null}

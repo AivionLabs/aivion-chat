@@ -178,3 +178,7 @@ claude-flow
 hive-mind-prompt-*.txt
 CLAUDE.md
 .gsd
+
+#Aivion-Chat
+.codegraph
+__pycache__

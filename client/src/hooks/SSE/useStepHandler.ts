@@ -449,10 +449,12 @@ export default function useStepHandler({
         let response = messageMap.current.get(responseMessageId);
 
         if (!response) {
-          // Find the actual response message - check if last message is a response, otherwise use initialResponse
+          // Find the actual response message - only use lastMessage if it IS the current response
+          // (resume scenario). Using a previous assistant message would seed this response with
+          // stale content (e.g. the previous message's cost footer).
           const lastMessage = messages[messages.length - 1] as TMessage;
           const responseMessage =
-            lastMessage && !lastMessage.isCreatedByUser
+            lastMessage && !lastMessage.isCreatedByUser && lastMessage.messageId === responseMessageId
               ? lastMessage
               : (submission?.initialResponse as TMessage);
 

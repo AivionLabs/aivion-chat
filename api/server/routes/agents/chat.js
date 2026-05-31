@@ -12,6 +12,7 @@ const { initializeClient } = require('~/server/services/Endpoints/agents');
 const AgentController = require('~/server/controllers/agents/request');
 const addTitle = require('~/server/services/Endpoints/agents/title');
 const { getRoleByName } = require('~/models');
+const { loadWorkflowPrompt } = require('~/server/utils/workflowPrompt');
 
 const router = express.Router();
 
@@ -30,6 +31,25 @@ router.use(checkAgentAccess);
 router.use(checkAgentResourceAccess);
 router.use(validateConvoAccess);
 router.use(buildEndpointOption);
+
+const ALLOWED_WORKFLOW_MODELS = ['aivion-free', 'aivion-quick', 'aivion-mid', 'aivion-pro'];
+
+// Workflow-type-specific system prompt injection.
+// If the request carries a workflow_id, resolve its slug via aivion-workflow,
+// then load the matching "workflow-{slug}" prompt from Bifrost and attach it
+// to req so the agent initializer can inject it as additional_instructions.
+// workflow_model (optional) overrides the agent's default model for this request.
+router.use(async (req, _res, next) => {
+  const workflowId = req.body?.workflow_id;
+  if (workflowId) {
+    req.workflowInstructions = await loadWorkflowPrompt(workflowId);
+  }
+  const workflowModel = req.body?.workflow_model;
+  if (workflowModel && ALLOWED_WORKFLOW_MODELS.includes(workflowModel)) {
+    req.workflowModel = workflowModel;
+  }
+  next();
+});
 
 const controller = async (req, res, next) => {
   await AgentController(req, res, next, initializeClient, addTitle);

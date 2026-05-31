@@ -1,521 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ComponentType } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useAuthContext } from '~/hooks/AuthContext';
-import type { ReviewTagGroup, RunStatus, Workflow, WorkflowOutput, WorkflowRun, WorkflowStep } from './types';
+import type {
+  Workflow,
+  WorkflowInputField,
+  WorkflowRun,
+  WorkflowReviewProps,
+  WorkflowStep,
+} from './types';
+import { TAG_COLOR_CLASSES, STATUS_LABEL, STATUS_BADGE, REC_LABELS, REC_OPTS, PRIORITY_OPTS } from './constants';
+import { completedStepMap, daysUntil, splitDots } from './helpers';
+import { useRunStream } from './useRunStream';
+import { ReportOutput, PendingPromptView, ResultFallback } from './ReportOutput';
+import { FitScoreRing } from './CandidateReview';
+import { CvScreeningReview } from './workflows/cv-screening';
+import { SocialMediaPostReview } from './workflows/social-media-post';
 
-const TAG_COLOR_CLASSES: Record<ReviewTagGroup['color'], { border: string; bg: string; title: string; chip: string }> = {
-  green:  { border: 'border-green-200 dark:border-green-800/40',   bg: 'bg-green-50 dark:bg-green-900/10',   title: 'text-green-700 dark:text-green-400',   chip: 'bg-green-100 text-green-700 dark:bg-green-800/30 dark:text-green-300' },
-  amber:  { border: 'border-amber-200 dark:border-amber-800/40',   bg: 'bg-amber-50 dark:bg-amber-900/10',   title: 'text-amber-700 dark:text-amber-400',   chip: 'bg-amber-100 text-amber-700 dark:bg-amber-800/30 dark:text-amber-300' },
-  red:    { border: 'border-red-200 dark:border-red-800/40',       bg: 'bg-red-50 dark:bg-red-900/10',       title: 'text-red-700 dark:text-red-400',       chip: 'bg-red-100 text-red-700 dark:bg-red-800/30 dark:text-red-300' },
-  blue:   { border: 'border-blue-200 dark:border-blue-800/40',     bg: 'bg-blue-50 dark:bg-blue-900/10',     title: 'text-blue-700 dark:text-blue-400',     chip: 'bg-blue-100 text-blue-700 dark:bg-blue-800/30 dark:text-blue-300' },
-  purple: { border: 'border-purple-200 dark:border-purple-800/40', bg: 'bg-purple-50 dark:bg-purple-900/10', title: 'text-purple-700 dark:text-purple-400', chip: 'bg-purple-100 text-purple-700 dark:bg-purple-800/30 dark:text-purple-300' },
-  gray:   { border: 'border-border-light',                         bg: 'bg-surface-secondary',               title: 'text-text-secondary',                  chip: 'bg-surface-tertiary text-text-secondary' },
+const WORKFLOW_REVIEW: Record<string, ComponentType<WorkflowReviewProps>> = {
+  'cv-screening': CvScreeningReview,
+  'social-media-post': SocialMediaPostReview,
 };
 
-const STATUS_LABEL: Record<RunStatus, string> = {
-  pending: 'Queued',
-  running: 'Running',
-  awaiting_user: 'Awaiting Review',
-  awaiting_oauth: 'Needs Reconnect',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
-
-const STATUS_BADGE: Record<RunStatus, string> = {
-  pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  running: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-  awaiting_user: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
-  awaiting_oauth: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-  failed: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  cancelled: 'text-text-secondary bg-surface-secondary',
-};
-
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function completedStepMap(run: WorkflowRun): Record<string, { output: unknown }> {
-  return (run.outputs?.['_completed_steps'] ?? {}) as Record<string, { output: unknown }>;
-}
-
-function daysUntil(iso: string): number {
-  return Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000));
-}
-
-// ── Template resolver ─────────────────────────────────────────────────────────
-
-function resolveTemplate(
-  template: string,
-  completedSteps: Record<string, { output: unknown }>,
-  inputs: Record<string, unknown> = {},
-): string {
-  return template.replace(/\$\{([^}]+)\}/g, (_, path: string) => {
-    if (path.startsWith('inputs.')) {
-      return String(inputs[path.slice('inputs.'.length)] ?? '');
-    }
-    if (path.startsWith('steps.')) {
-      const parts = path.slice('steps.'.length).split('.');
-      let value: unknown = completedSteps;
-      for (const part of parts) {
-        if (value == null || typeof value !== 'object') return '';
-        const m = part.match(/^([^\[]*)\[(\d+)\]$/);
-        if (m) {
-          const key = m[1];
-          const idx = parseInt(m[2], 10);
-          if (key) value = (value as Record<string, unknown>)[key];
-          if (!Array.isArray(value)) return '';
-          value = (value as unknown[])[idx];
-        } else {
-          value = (value as Record<string, unknown>)[part];
-        }
-      }
-      if (Array.isArray(value)) return JSON.stringify(value);
-      return value != null ? String(value) : '';
-    }
-    const [stepId, ...rest] = path.split('.');
-    const out = completedSteps[stepId]?.output;
-    return out ? String((out as Record<string, unknown>)[rest.join('.')] ?? '') : '';
-  });
-}
-
-// ── Output renderers ──────────────────────────────────────────────────────────
-
-function FieldValue({ raw, kind }: { raw: string; kind?: string }) {
-  if (kind === 'list') {
-    let items: string[] = [];
-    try { items = JSON.parse(raw); } catch { items = raw.split(',').map((s) => s.trim()); }
-    if (!Array.isArray(items) || !items.length) return <span className="text-text-secondary">—</span>;
-    return (
-      <ul className="mt-1 space-y-1">
-        {items.map((item, i) => (
-          <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-            {String(item)}
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return <span className="text-sm text-text-primary">{raw}</span>;
-}
-
-function resolveListItems(
-  items: string[],
-  completedSteps: Record<string, { output: unknown }>,
-  inputs: Record<string, unknown>,
-): string[] {
-  const result: string[] = [];
-  for (const tpl of items) {
-    const resolved = resolveTemplate(tpl, completedSteps, inputs);
-    try {
-      const parsed = JSON.parse(resolved);
-      if (Array.isArray(parsed)) {
-        result.push(...parsed.map(String));
-        continue;
-      }
-    } catch { /* fall through */ }
-    if (resolved.trim()) result.push(resolved);
-  }
-  return result;
-}
-
-function ReportOutput({
-  output,
-  completedSteps,
-  inputs,
-}: {
-  output: WorkflowOutput;
-  completedSteps: Record<string, { output: unknown }>;
-  inputs: Record<string, unknown>;
-}) {
-  if ('sections' in output && output.sections?.length) {
-    return (
-      <div className="space-y-4">
-        {output.sections.map((section, i) => {
-          if (section.type === 'key_value') {
-            const resolved = section.fields
-              .map((f) => ({ ...f, resolved: resolveTemplate(f.value, completedSteps, inputs) }))
-              .filter((f) => f.resolved.trim() !== '');
-            if (!resolved.length) return null;
-            return (
-              <div key={i} className="rounded-2xl border border-border-light bg-surface-primary p-5">
-                {section.title && (
-                  <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                    {section.title}
-                  </p>
-                )}
-                <dl className="space-y-4">
-                  {resolved.map((f) => (
-                    <div key={f.label}>
-                      <dt className="text-xs font-medium text-text-secondary">{f.label}</dt>
-                      <dd className="mt-0.5">
-                        <FieldValue raw={f.resolved} kind={f.kind} />
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            );
-          }
-          if (section.type === 'list') {
-            const listItems = resolveListItems(section.items ?? [], completedSteps, inputs);
-            if (!listItems.length) return null;
-            return (
-              <div key={i} className="rounded-2xl border border-border-light bg-surface-primary p-5">
-                {section.title && (
-                  <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                    {section.title}
-                  </p>
-                )}
-                <ul className="space-y-2">
-                  {listItems.map((item, j) => (
-                    <li key={j} className="flex items-start gap-2 text-sm text-text-primary">
-                      <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          }
-          return null;
-        })}
-      </div>
-    );
-  }
-  const fields = ('fields' in output ? output.fields : undefined) ?? [];
-  const resolved = fields
-    .map((f) => ({ ...f, resolved: resolveTemplate(f.value, completedSteps, inputs) }))
-    .filter((f) => f.resolved.trim() !== '');
-  if (!resolved.length) return null;
-  return (
-    <div className="rounded-2xl border border-border-light bg-surface-primary p-5">
-      {'title' in output && output.title && (
-        <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">{output.title}</p>
-      )}
-      <dl className="space-y-4">
-        {resolved.map((f) => (
-          <div key={f.label}>
-            <dt className="text-xs font-medium text-text-secondary">{f.label}</dt>
-            <dd className="mt-0.5">
-              <FieldValue raw={f.resolved} kind={f.kind} />
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </div>
-  );
-}
-
-// ── Pending prompt renderer ───────────────────────────────────────────────────
-
-function PendingPromptView({ raw }: { raw: string }) {
-  let parsed: Record<string, unknown> | null = null;
-  try {
-    const p = JSON.parse(raw);
-    if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p as Record<string, unknown>;
-  } catch { /* raw string */ }
-
-  if (!parsed) {
-    return <p className="text-sm text-text-primary whitespace-pre-wrap">{raw}</p>;
-  }
-
-  return (
-    <div className="space-y-3">
-      {Object.entries(parsed).map(([key, value]) => {
-        const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-        return (
-          <div key={key}>
-            <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">{label}</p>
-            {Array.isArray(value) ? (
-              <ul className="mt-1 space-y-1">
-                {(value as unknown[]).map((item, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-                    {String(item)}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-0.5 text-sm text-text-primary">{String(value ?? '—')}</p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Step output detail view ───────────────────────────────────────────────────
-
-function StepOutputView({ step, output }: { step: WorkflowStep; output: unknown }) {
-  const data = output as Record<string, unknown>;
-
-  if (step.type === 'scrub') {
-    const entities = (data?.entities ?? []) as Array<{ token: string; label: string; display_value: string }>;
-    return (
-      <div>
-        <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-          Masked Entities · {entities.length}
-        </p>
-        {entities.length === 0 ? (
-          <p className="text-sm text-text-secondary">No entities masked.</p>
-        ) : (
-          <div className="divide-y divide-border-light rounded-xl border border-border-light">
-            {entities.map((e, i) => (
-              <div key={i} className="flex items-center gap-4 px-4 py-3">
-                <code className="shrink-0 rounded bg-surface-secondary px-1.5 py-0.5 font-mono text-xs text-text-secondary">
-                  {e.token}
-                </code>
-                <span className="text-xs text-text-secondary">{e.label}</span>
-                <span className="ml-auto text-sm text-text-primary">{e.display_value}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  if (step.type === 'file_extract') {
-    const text = String(data?.text ?? data?.content ?? '');
-    return (
-      <div>
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-          Extracted Text · {text.length.toLocaleString()} chars
-        </p>
-        <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-xl border border-border-light bg-surface-primary p-4 text-xs text-text-primary">
-          {text || '—'}
-        </pre>
-      </div>
-    );
-  }
-
-  if (step.type === 'llm') {
-    if (typeof output === 'string') {
-      return <p className="whitespace-pre-wrap text-sm text-text-primary">{output}</p>;
-    }
-    const text = data?.result ?? data?.text ?? data?.output ?? data?.content;
-    if (typeof text === 'string') {
-      return <p className="whitespace-pre-wrap text-sm text-text-primary">{text}</p>;
-    }
-    const entries = Object.entries(data ?? {});
-    return (
-      <dl className="space-y-4">
-        {entries.map(([k, v]) => (
-          <div key={k}>
-            <dt className="text-xs font-medium capitalize text-text-secondary">{k.replace(/_/g, ' ')}</dt>
-            <dd className="mt-0.5">
-              {Array.isArray(v) ? (
-                <ul className="mt-1 space-y-1">
-                  {(v as unknown[]).map((item, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-                      <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-                      {String(item)}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <span className="text-sm text-text-primary">{String(v ?? '—')}</span>
-              )}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    );
-  }
-
-  const entries = Object.entries(data ?? {});
-  if (!entries.length) return <p className="text-sm text-text-secondary">No output recorded.</p>;
-  return (
-    <dl className="space-y-4">
-      {entries.map(([k, v]) => (
-        <div key={k}>
-          <dt className="text-xs font-medium capitalize text-text-secondary">{k.replace(/_/g, ' ')}</dt>
-          <dd className="mt-0.5">
-            {Array.isArray(v) ? (
-              <ul className="mt-1 space-y-1">
-                {(v as unknown[]).map((item, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-                    {String(item)}
-                  </li>
-                ))}
-              </ul>
-            ) : typeof v === 'object' && v !== null ? (
-              <pre className="overflow-x-auto whitespace-pre-wrap text-xs text-text-secondary">
-                {JSON.stringify(v, null, 2)}
-              </pre>
-            ) : (
-              <span className="text-sm text-text-primary">{String(v ?? '—')}</span>
-            )}
-          </dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-// ── Completed output fallback ─────────────────────────────────────────────────
-
-function ResultFallback({ outputs }: { outputs: Record<string, unknown> }) {
-  const entries = Object.entries(outputs).filter(([k]) => k !== '_completed_steps');
-  if (!entries.length) return null;
-  return (
-    <div className="space-y-4">
-      {entries.map(([key, value]) => {
-        const label = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-        return (
-          <div key={key} className="rounded-2xl border border-border-light bg-surface-primary p-5">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">{label}</p>
-            {typeof value === 'string' ? (
-              <p className="text-sm text-text-primary whitespace-pre-wrap">{value}</p>
-            ) : Array.isArray(value) ? (
-              <ul className="space-y-1">
-                {(value as unknown[]).map((item, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-text-secondary" />
-                    {String(item)}
-                  </li>
-                ))}
-              </ul>
-            ) : typeof value === 'object' && value !== null ? (
-              <div className="space-y-3">
-                {Object.entries(value as Record<string, unknown>).map(([k, v]) => (
-                  <div key={k}>
-                    <p className="text-xs text-text-tertiary">{k.replace(/_/g, ' ')}</p>
-                    <p className="mt-0.5 text-sm text-text-primary">
-                      {typeof v === 'string' ? v : JSON.stringify(v)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-text-primary">{String(value)}</p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── SSE hook ──────────────────────────────────────────────────────────────────
-
-function useRunStream(
-  runId: string | undefined,
-  token: string | undefined,
-  streamKey: number,
-  onUpdate: (run: WorkflowRun) => void,
-  onDone: () => void,
-) {
-  const abortRef = useRef<AbortController | null>(null);
-
-  const connect = useCallback(async () => {
-    if (!runId || !token) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      const res = await fetch(`/api/aivion/workflow/runs/${runId}/stream`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) { onDone(); return; }
-
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) !== -1) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          for (const line of block.split('\n')) {
-            if (!line.startsWith('data: ')) continue;
-            try {
-              const data = JSON.parse(line.slice(6)) as WorkflowRun;
-              onUpdate(data);
-            } catch { /* skip malformed */ }
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return;
-    } finally {
-      onDone();
-    }
-  }, [runId, token, streamKey, onUpdate, onDone]);
-
-  useEffect(() => {
-    void connect();
-    return () => abortRef.current?.abort();
-  }, [connect]);
-}
-
-// ── Review-gate constants ─────────────────────────────────────────────────────
-
-const REC_LABELS: Record<string, string> = {
-  screen_call: 'Screen Call',
-  technical_interview: 'Tech Interview',
-  hold: 'Hold',
-  request_more_info: 'More Info',
-  reject: 'Reject',
-};
-
-const REC_OPTS = [
-  { value: 'screen_call', label: 'Screen Call', active: 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700' },
-  { value: 'technical_interview', label: 'Tech Interview', active: 'bg-purple-100 text-purple-700 border-purple-300 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700' },
-  { value: 'hold', label: 'Hold', active: 'bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700' },
-  { value: 'request_more_info', label: 'More Info', active: 'bg-gray-200 text-gray-700 border-gray-400 dark:bg-gray-700 dark:text-gray-200 dark:border-gray-500' },
-  { value: 'reject', label: 'Reject', active: 'bg-red-100 text-red-700 border-red-300 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700' },
-];
-
-const PRIORITY_OPTS = [
-  { value: 'high', label: 'High', active: 'bg-red-100 text-red-700 border-red-300 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700' },
-  { value: 'medium', label: 'Medium', active: 'bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700' },
-  { value: 'low', label: 'Low', active: 'bg-gray-100 text-gray-600 border-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:border-gray-600' },
-];
-
-function splitDots(val: string | undefined): string[] {
-  if (!val || val === '—') return [];
-  return val.replace(/ …$/, '').split(' · ').filter(Boolean);
-}
-
-// ── Fit-score ring ────────────────────────────────────────────────────────────
-
-function FitScoreRing({ score }: { score: number }) {
-  const clamped = Math.min(10, Math.max(0, score));
-  const r = 34;
-  const circ = 2 * Math.PI * r;
-  const filled = (clamped / 10) * circ;
-  const color = clamped >= 7 ? '#22c55e' : clamped >= 5 ? '#f59e0b' : '#ef4444';
-  return (
-    <svg width="88" height="88" viewBox="0 0 88 88" aria-label={`Fit score ${clamped}/10`} className="shrink-0">
-      <circle cx="44" cy="44" r={r} fill="none" stroke="currentColor" strokeWidth="7" className="text-surface-secondary" />
-      <circle
-        cx="44" cy="44" r={r} fill="none"
-        stroke={color} strokeWidth="7"
-        strokeDasharray={`${filled} ${circ}`}
-        strokeLinecap="round"
-        transform="rotate(-90 44 44)"
-        style={{ transition: 'stroke-dasharray 0.5s ease' }}
-      />
-      <text x="44" y="50" textAnchor="middle" fontSize="22" fontWeight="700" fill={color}>{clamped}</text>
-      <text x="44" y="64" textAnchor="middle" fontSize="10" fill="#9ca3af">/10</text>
-    </svg>
-  );
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
+export { STATUS_LABEL, STATUS_BADGE };
 
 export default function WorkflowRunPage() {
   const { id, runId } = useParams<{ id: string; runId: string }>();
@@ -528,6 +35,7 @@ export default function WorkflowRunPage() {
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [streamKey, setStreamKey] = useState(0);
+  const [assessmentExpanded, setAssessmentExpanded] = useState(false);
   // Tracks which runId we've already done a completion re-fetch for to avoid loops
   const completionFetchedRef = useRef<string | null>(null);
 
@@ -612,7 +120,13 @@ export default function WorkflowRunPage() {
   // Seed resume form defaults when awaiting_user — skip readonly display fields
   useEffect(() => {
     if (run?.status !== 'awaiting_user') return;
-    const fields = (run.pending_input_schema?.fields ?? []).filter(
+    const pendingSchema = run.pending_input_schema;
+    const schemaFields = pendingSchema &&
+      pendingSchema.type !== 'candidate_review_form' &&
+      pendingSchema.type !== 'social_media_post'
+      ? ((pendingSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? [])
+      : [];
+    const fields = schemaFields.filter(
       (f) => (f.type as string) !== 'readonly',
     );
     if (fields.length === 0) return;
@@ -712,7 +226,13 @@ export default function WorkflowRunPage() {
     } catch {}
   }
 
-  const reviewAllFields = effectiveSchema?.fields ?? [];
+  const isCandidateReview = effectiveSchema?.type === 'candidate_review_form';
+  const isCustomReviewSchema = effectiveSchema?.type === 'social_media_post';
+  const CustomReview = workflow?.slug ? WORKFLOW_REVIEW[workflow.slug] : undefined;
+
+  const reviewAllFields = isCandidateReview || isCustomReviewSchema || !effectiveSchema
+    ? []
+    : ((effectiveSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? []);
   const roFields = Object.fromEntries(
     reviewAllFields
       .filter((f) => (f.type as string) === 'readonly')
@@ -727,6 +247,14 @@ export default function WorkflowRunPage() {
     return reviewAllFields.find((f) => f.name === key)?.label
       ?? key.replace(/^_/, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }
+
+  const profileValues = (reviewDisplay?.profile_fields ?? []).map((key) =>
+    (roFields[key] && roFields[key] !== '—') ? roFields[key] : String(run.inputs?.[key] ?? ''),
+  ).filter(Boolean);
+  // Generic entity identity — profile_fields[0] is the primary title, [1] the subtitle (person, doc, contract, etc.)
+  const entityName = profileValues[0] ?? '';
+  const entitySubtitle = profileValues[1] ?? '';
+  const entityInitials = entityName.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -784,284 +312,462 @@ export default function WorkflowRunPage() {
 
         {/* awaiting_user */}
         {run.status === 'awaiting_user' && (
-          <div className="flex-1 overflow-y-auto p-5 lg:p-7">
-            {run.expires_at && (
-              <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
-                <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                  <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                </svg>
-                Expires in {daysUntil(run.expires_at)} day{daysUntil(run.expires_at) === 1 ? '' : 's'}
-              </div>
-            )}
-
-            {reviewDisplay ? (
-              <div className="space-y-4">
-                {/* Row 1: Profile + AI Assessment (spec-driven) */}
-                <div className="grid grid-cols-2 gap-4">
-                  {(reviewDisplay.profile_fields?.length ?? 0) > 0 && (
-                    <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
-                        {reviewDisplay.profile_label ?? 'Details'}
-                      </p>
-                      <div className="space-y-3">
-                        {reviewDisplay.profile_fields!.map((key) => {
-                          const value = roFields[key] && roFields[key] !== '—'
-                            ? roFields[key]
-                            : String(run.inputs?.[key] ?? '');
-                          return value ? (
-                            <div key={key}>
-                              <p className="text-xs text-text-tertiary">{fieldLabel(key)}</p>
-                              <p className="mt-0.5 text-sm font-medium text-text-primary">{value}</p>
-                            </div>
-                          ) : null;
-                        })}
+          <div className="flex-1">
+            {/* ── Sticky decision bar ─────────────────────────────────────────── */}
+            {reviewDisplay && (
+              <div className="sticky top-0 z-10 border-b border-border-light bg-surface-primary/95 px-5 py-3 backdrop-blur-sm lg:px-7">
+                <div className="flex items-center gap-3">
+                  <div className="flex shrink-0 items-center gap-2">
+                    {entityName && (
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
+                        <span className="text-xs font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
                       </div>
+                    )}
+                    <div className="hidden min-w-0 sm:block">
+                      <p className="text-sm font-semibold leading-tight text-text-primary">{entityName || (workflow?.name ?? '')}</p>
+                      {entitySubtitle && (
+                        <p className="max-w-[160px] truncate text-[11px] text-text-secondary">{entitySubtitle}</p>
+                      )}
                     </div>
+                  </div>
+                  {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
+                    <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} size={52} />
                   )}
-                  {(reviewDisplay.assessment_fields?.length ?? 0) > 0 && (
-                    <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
-                        {reviewDisplay.assessment_label ?? 'AI Assessment'}
-                      </p>
-                      <div className="space-y-2">
-                        {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
-                          <p className="text-sm font-semibold text-text-primary">
-                            Fit Score: {roFields[reviewDisplay.score_field]}/10
-                          </p>
-                        )}
-                        {reviewDisplay.assessment_fields!
-                          .filter((key) => key !== reviewDisplay.score_field)
-                          .map((key, idx) => {
-                            const value = roFields[key];
-                            if (!value || value === '—') return null;
-                            return (
-                              <p key={key} className={`text-sm ${idx === 0 ? 'font-medium text-text-primary' : 'text-text-secondary'}`}>
-                                {value}
-                              </p>
-                            );
-                          })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Row 2: Tag groups (spec-driven) */}
-                {(reviewDisplay.tag_groups?.length ?? 0) > 0 && (() => {
-                  const activeGroups = reviewDisplay.tag_groups!.filter(
-                    (g) => splitDots(roFields[g.field] ?? '').length > 0,
-                  );
-                  if (!activeGroups.length) return null;
-                  return (
-                    <div className="flex gap-4">
-                      {activeGroups.map((group) => {
-                        const items = splitDots(roFields[group.field] ?? '');
-                        const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
-                        return (
-                          <div key={group.field} className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}>
-                            <p className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}>
-                              {group.label}
-                            </p>
-                            <div className="flex flex-wrap gap-1.5">
-                              {items.map((item, i) => (
-                                <span key={i} className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}>{item}</span>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
-
-                {/* Row 3: Decision */}
-                <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                  <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Decision</p>
+                  <div className="mx-1 h-8 w-px shrink-0 bg-border-light" />
                   {aiRec && (
-                    <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 dark:border-amber-700/40 dark:bg-amber-900/20">
-                      <p className="flex-1 text-xs text-amber-800 dark:text-amber-300">
-                        AI suggests: <span className="font-semibold">{aiRec.replace(/_/g, ' ')}</span>
-                      </p>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className="hidden text-xs text-text-secondary sm:inline">AI:</span>
+                      <span className="text-xs font-semibold text-text-primary">
+                        {REC_LABELS[aiRec] ?? aiRec.replace(/_/g, ' ')}
+                      </span>
                       <button
                         type="button"
                         onClick={() => setResumeValues((p) => ({ ...p, final_recommendation: aiRec, priority: p['priority'] || 'medium' }))}
-                        className="shrink-0 rounded-lg border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/30 dark:text-amber-300"
+                        className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
                       >
                         ✓ Accept
                       </button>
                     </div>
                   )}
-                  <form id="review-gate-form" onSubmit={handleResume} className="space-y-5">
-                    {reviewEditFields.find((f) => f.name === 'final_recommendation') && (
-                      <div>
-                        <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                          Decision <span className="text-red-500">*</span>
-                        </label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {REC_OPTS.map((opt) => {
-                            const selected = resumeValues['final_recommendation'] === opt.value;
-                            return (
-                              <button
-                                key={opt.value}
-                                type="button"
-                                onClick={() => setResumeValues((p) => ({ ...p, final_recommendation: opt.value }))}
-                                className={`rounded-full border px-3 py-1 text-xs font-medium transition-all ${
-                                  selected
-                                    ? opt.active + ' ring-2 ring-current ring-offset-1'
-                                    : 'border-border-light bg-surface-secondary text-text-secondary hover:border-border-medium hover:text-text-primary'
-                                }`}
-                              >
-                                {opt.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                  <div className="flex-1" />
+                  {resumeValues['final_recommendation'] && (
+                    <span className="shrink-0 rounded-full bg-surface-secondary px-2.5 py-1 text-xs font-medium text-text-secondary">
+                      → {REC_LABELS[resumeValues['final_recommendation']] ?? resumeValues['final_recommendation']}
+                    </span>
+                  )}
+                  <button
+                    type="submit"
+                    form="review-gate-form"
+                    disabled={resuming || !resumeValues['final_recommendation']}
+                    className="shrink-0 flex items-center gap-1.5 rounded-xl bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {resuming && (
+                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                        <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
                     )}
-                    {reviewEditFields.find((f) => f.name === 'priority') && (
-                      <div>
-                        <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Priority</label>
-                        <div className="flex gap-1.5">
-                          {PRIORITY_OPTS.map((opt) => {
-                            const selected = resumeValues['priority'] === opt.value;
-                            return (
-                              <button
-                                key={opt.value}
-                                type="button"
-                                onClick={() => setResumeValues((p) => ({ ...p, priority: opt.value }))}
-                                className={`flex-1 rounded-lg border py-1.5 text-xs font-medium transition-all ${
-                                  selected
-                                    ? opt.active + ' ring-1 ring-current'
-                                    : 'border-border-light bg-surface-secondary text-text-secondary hover:text-text-primary'
-                                }`}
-                              >
-                                {opt.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    {reviewEditFields.find((f) => f.name === 'recruiter_notes') && (
-                      <div>
-                        <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Notes</label>
-                        <textarea
-                          rows={3}
-                          className="w-full resize-none rounded-lg border border-border-light bg-surface-secondary px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-                          placeholder="Add observations, context, or override the AI recommendation…"
-                          value={resumeValues['recruiter_notes'] ?? ''}
-                          onChange={(e) => setResumeValues((p) => ({ ...p, recruiter_notes: e.target.value }))}
-                        />
-                      </div>
-                    )}
-                    {reviewEditFields
-                      .filter((f) => !['final_recommendation', 'priority', 'recruiter_notes'].includes(f.name))
-                      .map((f) => (
-                        <div key={f.name}>
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                            {f.label}
-                            {f.required && <span className="ml-1 text-red-500">*</span>}
-                          </label>
-                          {f.type === 'select' ? (
-                            <select
-                              className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-                              value={resumeValues[f.name] ?? ''}
-                              onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
-                            >
-                              {(f.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-                            </select>
-                          ) : (
-                            <input
-                              type="text"
-                              className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-                              value={resumeValues[f.name] ?? ''}
-                              onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
-                              placeholder={f.placeholder}
-                            />
-                          )}
-                        </div>
-                      ))}
-                    {resumeError && (
-                      <p className="text-xs text-red-500">{resumeError}</p>
-                    )}
-                    <button
-                      type="submit"
-                      disabled={resuming || !resumeValues['final_recommendation']}
-                      title="⌘+Enter"
-                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {resuming ? (
-                        <>
-                          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
-                            <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                          </svg>
-                          Submitting…
-                        </>
-                      ) : (
-                        <>
-                          Submit Decision
-                          <kbd className="ml-1 rounded bg-amber-400/60 px-1.5 py-0.5 text-xs font-normal">⌘↵</kbd>
-                        </>
-                      )}
-                    </button>
-                  </form>
+                    Submit Decision
+                  </button>
                 </div>
               </div>
-            ) : (
-              <div className="space-y-6">
-                {specOutput && (
-                  <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
-                )}
-                {run.pending_prompt && (
-                  <div>
-                    <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">AI Assessment</p>
-                    <div className="rounded-2xl border border-border-light bg-surface-primary p-5">
-                      <PendingPromptView raw={run.pending_prompt} />
-                    </div>
+            )}
+
+            {/* ── Main content ─────────────────────────────────────────────────── */}
+            <div className="p-5 lg:p-7">
+              {run.expires_at && (
+                <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
+                  <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                  </svg>
+                  Expires in {daysUntil(run.expires_at)} day{daysUntil(run.expires_at) === 1 ? '' : 's'}
+                </div>
+              )}
+
+              {reviewDisplay ? (
+                <div className="space-y-4">
+                  {/* Row 1: Profile + AI Assessment */}
+                  <div className="grid grid-cols-2 gap-4">
+                    {(reviewDisplay.profile_fields?.length ?? 0) > 0 && (
+                      <div className="rounded-xl border border-border-light bg-surface-primary p-5">
+                        <div className="mb-4 flex items-center gap-3">
+                          {entityName && (
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
+                              <span className="text-base font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
+                            </div>
+                          )}
+                          <p className="text-xs font-semibold uppercase tracking-wider text-text-tertiary">
+                            {reviewDisplay.profile_label ?? 'Details'}
+                          </p>
+                        </div>
+                        <div className="space-y-3">
+                          {reviewDisplay.profile_fields!.map((key) => {
+                            const value = roFields[key] && roFields[key] !== '—'
+                              ? roFields[key]
+                              : String(run.inputs?.[key] ?? '');
+                            return value ? (
+                              <div key={key}>
+                                <p className="text-xs text-text-tertiary">{fieldLabel(key)}</p>
+                                <p className="mt-0.5 text-sm font-medium text-text-primary">{value}</p>
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {(reviewDisplay.assessment_fields?.length ?? 0) > 0 && (
+                      <div className="rounded-xl border border-border-light bg-surface-primary p-5">
+                        <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
+                          {reviewDisplay.assessment_label ?? 'AI Assessment'}
+                        </p>
+                        <div className="flex items-start gap-4">
+                          {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
+                            <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} />
+                          )}
+                          <div className="min-w-0 flex-1 space-y-1.5">
+                            {reviewDisplay.assessment_fields!
+                              .filter((key) => key !== reviewDisplay.score_field)
+                              .map((key, idx) => {
+                                const value = roFields[key];
+                                if (!value || value === '—') return null;
+                                if (idx > 0 && !assessmentExpanded) return null;
+                                return (
+                                  <p key={key} className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}>
+                                    {value}
+                                  </p>
+                                );
+                              })}
+                            {reviewDisplay.assessment_fields!.filter(
+                              (key) => key !== reviewDisplay.score_field && roFields[key] && roFields[key] !== '—',
+                            ).length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => setAssessmentExpanded((p) => !p)}
+                                className="mt-1 text-xs text-amber-600 hover:underline dark:text-amber-400"
+                              >
+                                {assessmentExpanded ? 'Show less' : 'Show rationale'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-                {reviewEditFields.length > 0 && (
+
+                  {/* Row 2: Tag groups */}
+                  {(reviewDisplay.tag_groups?.length ?? 0) > 0 && (() => {
+                    const activeGroups = reviewDisplay.tag_groups!.filter(
+                      (g) => splitDots(roFields[g.field] ?? '').length > 0,
+                    );
+                    if (!activeGroups.length) return null;
+                    return (
+                      <div className="flex gap-4">
+                        {activeGroups.map((group) => {
+                          const items = splitDots(roFields[group.field] ?? '');
+                          const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
+                          return (
+                            <div key={group.field} className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}>
+                              <p className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}>
+                                {group.label}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {items.map((item, i) => (
+                                  <span key={i} className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}>{item}</span>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Row 3: Decision form */}
                   <div className="rounded-xl border border-border-light bg-surface-primary p-5">
                     <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Decision</p>
-                    <form id="review-gate-form" onSubmit={handleResume} className="space-y-4">
-                      {reviewEditFields.map((f) => (
-                        <div key={f.name}>
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                            {f.label}
-                            {f.required && <span className="ml-1 text-red-500">*</span>}
+                    <form id="review-gate-form" onSubmit={handleResume} className="space-y-5">
+                      {reviewEditFields.find((f) => f.name === 'final_recommendation') && (
+                        <div>
+                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                            Decision <span className="text-red-500">*</span>
                           </label>
-                          {f.type === 'select' ? (
-                            <select
-                              className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-                              value={resumeValues[f.name] ?? ''}
-                              onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
-                            >
-                              {(f.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-                            </select>
-                          ) : (
-                            <input
-                              type="text"
-                              className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-                              value={resumeValues[f.name] ?? ''}
-                              onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
-                              placeholder={f.placeholder}
-                            />
-                          )}
+                          <div className="flex flex-wrap gap-1.5">
+                            {REC_OPTS.map((opt) => {
+                              const selected = resumeValues['final_recommendation'] === opt.value;
+                              return (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  onClick={() => setResumeValues((p) => ({ ...p, final_recommendation: opt.value }))}
+                                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-all ${
+                                    selected
+                                      ? opt.active + ' ring-2 ring-current ring-offset-1'
+                                      : 'border-border-light bg-surface-secondary text-text-secondary hover:border-border-medium hover:text-text-primary'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                      ))}
-                      {resumeError && <p className="text-xs text-red-500">{resumeError}</p>}
+                      )}
+                      {reviewEditFields.find((f) => f.name === 'priority') && (
+                        <div>
+                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Priority</label>
+                          <div className="flex gap-1.5">
+                            {PRIORITY_OPTS.map((opt) => {
+                              const selected = resumeValues['priority'] === opt.value;
+                              return (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  onClick={() => setResumeValues((p) => ({ ...p, priority: opt.value }))}
+                                  className={`flex-1 rounded-lg border py-1.5 text-xs font-medium transition-all ${
+                                    selected
+                                      ? opt.active + ' ring-1 ring-current'
+                                      : 'border-border-light bg-surface-secondary text-text-secondary hover:text-text-primary'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {reviewEditFields.find((f) => f.name === 'recruiter_notes') && (
+                        <div>
+                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Notes</label>
+                          <textarea
+                            rows={3}
+                            className="w-full resize-none rounded-lg border border-border-light bg-surface-secondary px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                            placeholder="Add observations, context, or override the AI recommendation…"
+                            value={resumeValues['recruiter_notes'] ?? ''}
+                            onChange={(e) => setResumeValues((p) => ({ ...p, recruiter_notes: e.target.value }))}
+                          />
+                        </div>
+                      )}
+                      {reviewEditFields
+                        .filter((f) => !['final_recommendation', 'priority', 'recruiter_notes'].includes(f.name))
+                        .map((f) => (
+                          <div key={f.name}>
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                              {f.label}
+                              {f.required && <span className="ml-1 text-red-500">*</span>}
+                            </label>
+                            {f.type === 'select' ? (
+                              <select
+                                className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                                value={resumeValues[f.name] ?? ''}
+                                onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                              >
+                                {(f.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                              </select>
+                            ) : (
+                              <input
+                                type="text"
+                                className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                                value={resumeValues[f.name] ?? ''}
+                                onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                placeholder={f.placeholder}
+                              />
+                            )}
+                          </div>
+                        ))}
+                      {resumeError && (
+                        <p className="text-xs text-red-500">{resumeError}</p>
+                      )}
                       <button
                         type="submit"
-                        disabled={resuming}
+                        disabled={resuming || !resumeValues['final_recommendation']}
+                        title="⌘+Enter"
                         className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {resuming ? 'Submitting…' : 'Submit'}
+                        {resuming ? (
+                          <>
+                            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
+                              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                              <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                            Submitting…
+                          </>
+                        ) : (
+                          <>
+                            Submit Decision
+                            <kbd className="ml-1 rounded bg-amber-400/60 px-1.5 py-0.5 text-xs font-normal">⌘↵</kbd>
+                          </>
+                        )}
                       </button>
                     </form>
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              ) : CustomReview ? (
+                <CustomReview run={run} workflow={workflow} runId={runId!} token={token!} onResumed={() => setStreamKey((k) => k + 1)} />
+              ) : (
+                <div className="space-y-6">
+                  {specOutput && (
+                    <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
+                  )}
+                  {run.pending_prompt && (
+                    <div>
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">AI Assessment</p>
+                      <div className="rounded-2xl border border-border-light bg-surface-primary p-5">
+                        <PendingPromptView raw={run.pending_prompt} />
+                      </div>
+                    </div>
+                  )}
+                  {reviewEditFields.length > 0 && (
+                    <div className="space-y-4">
+                      {/* Readonly info fields shown as contextual links above the form */}
+                      {reviewAllFields.filter((f) => (f.type as string) === 'readonly').map((f) => {
+                        const val = String(f.default ?? '');
+                        if (!val || val === '—') return null;
+                        const isUrl = /^https?:\/\//.test(val);
+                        return (
+                          <div key={f.name} className="flex items-center gap-3 rounded-xl border border-border-light bg-surface-secondary px-4 py-3">
+                            <svg className="h-4 w-4 shrink-0 text-text-tertiary" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                              <path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" />
+                            </svg>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs text-text-tertiary">{f.label}</p>
+                              {isUrl ? (
+                                <a href={val} target="_blank" rel="noopener noreferrer" className="block truncate text-sm text-amber-600 hover:underline dark:text-amber-400">
+                                  {val}
+                                </a>
+                              ) : (
+                                <p className="truncate text-sm text-text-primary">{val}</p>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      <div className="rounded-xl border border-border-light bg-surface-primary p-5">
+                        <form id="review-gate-form" onSubmit={handleResume} className="space-y-5">
+                          {reviewEditFields.map((f) => {
+                            if (f.type === 'textarea') {
+                              const charCount = (resumeValues[f.name] ?? '').length;
+                              return (
+                                <div key={f.name}>
+                                  <div className="mb-2 flex items-center justify-between">
+                                    <label className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                                      {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                    </label>
+                                    <span className="tabular-nums text-xs text-text-tertiary">{charCount.toLocaleString()} chars</span>
+                                  </div>
+                                  <textarea
+                                    rows={10}
+                                    className="w-full resize-y rounded-lg border border-border-light bg-surface-secondary px-3 py-3 text-sm leading-relaxed text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                                    value={resumeValues[f.name] ?? ''}
+                                    onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                    placeholder="Edit the post text before publishing…"
+                                  />
+                                </div>
+                              );
+                            }
+
+                            if (f.type === 'select' && (f.options ?? []).length <= 4) {
+                              const DECISION_STYLE: Record<string, { active: string; inactive: string; icon: string }> = {
+                                publish: {
+                                  active: 'bg-green-500 border-green-500 text-white shadow-sm',
+                                  inactive: 'border-green-300 text-green-700 bg-green-50 hover:bg-green-100 dark:border-green-700/50 dark:text-green-400 dark:bg-green-900/10 dark:hover:bg-green-900/20',
+                                  icon: '✓',
+                                },
+                                reject: {
+                                  active: 'bg-red-500 border-red-500 text-white shadow-sm',
+                                  inactive: 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100 dark:border-red-700/50 dark:text-red-400 dark:bg-red-900/10 dark:hover:bg-red-900/20',
+                                  icon: '✕',
+                                },
+                              };
+                              return (
+                                <div key={f.name}>
+                                  <label className="mb-3 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                                    {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                  </label>
+                                  <div className="flex gap-3">
+                                    {(f.options ?? []).map((opt) => {
+                                      const selected = resumeValues[f.name] === opt;
+                                      const style = DECISION_STYLE[opt] ?? {
+                                        active: 'bg-amber-500 border-amber-500 text-white',
+                                        inactive: 'border-border-light bg-surface-secondary text-text-secondary hover:text-text-primary',
+                                        icon: '·',
+                                      };
+                                      return (
+                                        <button
+                                          key={opt}
+                                          type="button"
+                                          onClick={() => setResumeValues((p) => ({ ...p, [f.name]: opt }))}
+                                          className={`flex flex-1 items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-all ${selected ? style.active : style.inactive}`}
+                                        >
+                                          <span>{style.icon}</span>
+                                          {opt.charAt(0).toUpperCase() + opt.slice(1)}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <div key={f.name}>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                                  {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                </label>
+                                <input
+                                  type="text"
+                                  className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                                  value={resumeValues[f.name] ?? ''}
+                                  onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                  placeholder={f.placeholder}
+                                />
+                              </div>
+                            );
+                          })}
+                          {resumeError && <p className="text-xs text-red-500">{resumeError}</p>}
+                          {(() => {
+                            const decision = resumeValues['decision'];
+                            const hasRequiredSelects = reviewEditFields
+                              .filter((f) => f.type === 'select' && f.required)
+                              .every((f) => !!resumeValues[f.name]);
+                            const btnCls = decision === 'publish'
+                              ? 'bg-green-500 hover:bg-green-600'
+                              : decision === 'reject'
+                                ? 'bg-red-500 hover:bg-red-600'
+                                : 'bg-amber-500 hover:bg-amber-600';
+                            return (
+                              <button
+                                type="submit"
+                                disabled={resuming || !hasRequiredSelects}
+                                title="⌘+Enter"
+                                className={`flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${btnCls}`}
+                              >
+                                {resuming ? (
+                                  <>
+                                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
+                                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                                      <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                    </svg>
+                                    Submitting…
+                                  </>
+                                ) : decision === 'publish' ? (
+                                  <>Publish Post <kbd className="ml-1 rounded bg-green-400/60 px-1.5 py-0.5 text-xs font-normal">⌘↵</kbd></>
+                                ) : decision === 'reject' ? (
+                                  'Reject'
+                                ) : (
+                                  'Submit'
+                                )}
+                              </button>
+                            );
+                          })()}
+                        </form>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1096,15 +802,22 @@ export default function WorkflowRunPage() {
               </div>
             </div>
 
-            {reviewDisplay && reviewAllFields.length > 0 ? (
+            {reviewDisplay && reviewAllFields.length > 0 && !isCandidateReview ? (
               <div className="space-y-4">
                 {/* Row 1: Profile + AI Assessment */}
                 <div className="grid grid-cols-2 gap-4">
                   {(reviewDisplay.profile_fields?.length ?? 0) > 0 && (
                     <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
-                        {reviewDisplay.profile_label ?? 'Details'}
-                      </p>
+                      <div className="mb-4 flex items-center gap-3">
+                        {entityName && (
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
+                            <span className="text-base font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
+                          </div>
+                        )}
+                        <p className="text-xs font-semibold uppercase tracking-wider text-text-tertiary">
+                          {reviewDisplay.profile_label ?? 'Details'}
+                        </p>
+                      </div>
                       <div className="space-y-3">
                         {reviewDisplay.profile_fields!.map((key) => {
                           const value = roFields[key] && roFields[key] !== '—'
@@ -1122,26 +835,38 @@ export default function WorkflowRunPage() {
                   )}
                   {(reviewDisplay.assessment_fields?.length ?? 0) > 0 && (
                     <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
+                      <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
                         {reviewDisplay.assessment_label ?? 'AI Assessment'}
                       </p>
-                      <div className="space-y-2">
+                      <div className="flex items-start gap-4">
                         {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
-                          <p className="text-sm font-semibold text-text-primary">
-                            Fit Score: {roFields[reviewDisplay.score_field]}/10
-                          </p>
+                          <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} />
                         )}
-                        {reviewDisplay.assessment_fields!
-                          .filter((key) => key !== reviewDisplay.score_field)
-                          .map((key, idx) => {
-                            const value = roFields[key];
-                            if (!value || value === '—') return null;
-                            return (
-                              <p key={key} className={`text-sm ${idx === 0 ? 'font-medium text-text-primary' : 'text-text-secondary'}`}>
-                                {value}
-                              </p>
-                            );
-                          })}
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          {reviewDisplay.assessment_fields!
+                            .filter((key) => key !== reviewDisplay.score_field)
+                            .map((key, idx) => {
+                              const value = roFields[key];
+                              if (!value || value === '—') return null;
+                              if (idx > 0 && !assessmentExpanded) return null;
+                              return (
+                                <p key={key} className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}>
+                                  {value}
+                                </p>
+                              );
+                            })}
+                          {reviewDisplay.assessment_fields!.filter(
+                            (key) => key !== reviewDisplay.score_field && roFields[key] && roFields[key] !== '—',
+                          ).length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => setAssessmentExpanded((p) => !p)}
+                              className="mt-1 text-xs text-amber-600 hover:underline dark:text-amber-400"
+                            >
+                              {assessmentExpanded ? 'Show less' : 'Show rationale'}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1213,6 +938,8 @@ export default function WorkflowRunPage() {
                   );
                 })()}
               </div>
+            ) : CustomReview ? (
+              <CustomReview run={run} workflow={workflow} runId={runId!} token={token!} onResumed={() => setStreamKey((k) => k + 1)} />
             ) : specOutput ? (
               <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
             ) : run.outputs && Object.keys(run.outputs).some((k) => k !== '_completed_steps') ? (

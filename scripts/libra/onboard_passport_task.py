@@ -20,10 +20,10 @@ from pathlib import Path
 
 import yaml
 
-REPO_ROOT = Path(__file__).parent.parent.parent
-TASKS_YAML = REPO_ROOT / "tasks.yaml"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # AivionLabsNew/
+TASKS_YAML = REPO_ROOT / "aivion-router" / "tasks.yaml"
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "bifrost"))
+sys.path.insert(0, str(REPO_ROOT / "aivion-router" / "scripts" / "bifrost"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _client import BifrostAdmin  # noqa: E402

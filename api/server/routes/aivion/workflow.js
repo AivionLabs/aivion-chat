@@ -228,8 +228,8 @@ router.post('/assist', async (req, res) => {
 
     // Build a single prompt string from the conversation
     const system = context
-      ? `You are a helpful AI assistant for workflow automation. Current context:\n${context}\n\nAnswer concisely.`
-      : 'You are a helpful AI assistant for workflow automation. Answer concisely.';
+      ? `You are an AI assistant scoped strictly to this workflow run. Answer only questions about the candidate, the AI assessment, fit score, strengths, gaps, red flags, or what action the recruiter should take next. Politely decline any question not related to this workflow run.\n\nRun context:\n${context}`
+      : 'You are an AI assistant for workflow runs. Answer only questions about workflow runs, candidates, assessments, and HR best practices. Politely decline unrelated questions.';
     const history = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)

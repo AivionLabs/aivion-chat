@@ -245,6 +245,20 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     throw new Error('Agent not found');
   }
 
+  // Inject workflow-type-specific Bifrost prompt when the chat route resolved one.
+  // This overrides the agent's static additional_instructions for this request only.
+  if (req.workflowInstructions) {
+    primaryAgent.additional_instructions = req.workflowInstructions;
+  }
+
+  // Override the agent's model when the user has selected a different one from the panel.
+  if (req.workflowModel) {
+    primaryAgent.model = req.workflowModel;
+    if (primaryAgent.model_parameters) {
+      primaryAgent.model_parameters.model = req.workflowModel;
+    }
+  }
+
   const modelsConfig = await getModelsConfig(req);
   const validationResult = await validateAgentModel({
     req,

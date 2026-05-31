@@ -15,28 +15,58 @@ from typing import Any
 
 import httpx
 
-DEFAULT_BASE_URL = "http://localhost:3081"
+DEFAULT_BASE_URL = "http://localhost:3080"
 DEFAULT_TIMEOUT = 30.0
+
+
+def _login(base_url: str, email: str, password: str) -> str:
+    """Log in to LibreChat and return a JWT token."""
+    r = httpx.post(
+        f"{base_url}/api/auth/login",
+        json={"email": email, "password": password},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if not r.is_success:
+        print(f"error: login failed ({r.status_code}): {r.text}", file=sys.stderr)
+        sys.exit(1)
+    token = r.json().get("token")
+    if not token:
+        print("error: no token in login response", file=sys.stderr)
+        sys.exit(1)
+    return token
 
 
 class LibreChatAdmin:
     def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
         url = base_url or os.environ.get("LIBRECHAT_URL", DEFAULT_BASE_URL)
+        self.base_url = url.rstrip("/")
+
+        # Prefer email/password login (gets a JWT that works for all endpoints).
+        # Fall back to LIBRECHAT_API_KEY if set.
+        email = os.environ.get("LIBRECHAT_EMAIL", "")
+        password = os.environ.get("LIBRECHAT_PASSWORD", "")
         key = api_key or os.environ.get("LIBRECHAT_API_KEY", "")
-        if not key:
+
+        if email and password:
+            key = _login(self.base_url, email, password)
+            print(f"  logged in as {email}")
+        elif not key:
             print(
-                "error: LIBRECHAT_API_KEY not set. "
-                "Generate one in LibreChat UI → Settings → API Keys (admin account required).",
+                "error: set LIBRECHAT_EMAIL + LIBRECHAT_PASSWORD (recommended) "
+                "or LIBRECHAT_API_KEY.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        self.base_url = url.rstrip("/")
+
         self.client = httpx.Client(
             base_url=self.base_url,
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                # LibreChat's uaParser middleware rejects requests without a browser UA.
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             },
             timeout=DEFAULT_TIMEOUT,
