@@ -9,6 +9,7 @@
  * the OIDC strategy) and run a cascade delete so the MongoDB record doesn't
  * block the user from logging in again if their Clerk account is re-created.
  */
+const crypto = require('crypto');
 const express = require('express');
 const { logger } = require('@librechat/data-schemas');
 const db = require('~/models');
@@ -17,9 +18,17 @@ const router = express.Router();
 
 const TOKEN = process.env.INTERNAL_SERVICE_TOKEN || 'dev-internal-token-rotate-me';
 
+/** Constant-time bearer comparison (timingSafeEqual throws on length mismatch). */
+const tokenMatches = (auth) => {
+  const expected = `Bearer ${TOKEN}`;
+  const a = Buffer.from(auth);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
 router.post('/', express.json(), async (req, res) => {
   const auth = req.headers['authorization'] ?? '';
-  if (auth !== `Bearer ${TOKEN}`) {
+  if (!tokenMatches(auth)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 

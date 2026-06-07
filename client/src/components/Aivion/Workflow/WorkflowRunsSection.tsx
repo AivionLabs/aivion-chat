@@ -83,6 +83,7 @@ function PipelineStepIcon({ state }: { state: StepState }) {
 
 const PIPELINE_STATUS_BADGE: Record<RunStatus, string> = {
   pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  scheduled: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
   running: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
   awaiting_user: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
   awaiting_oauth: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
@@ -93,6 +94,7 @@ const PIPELINE_STATUS_BADGE: Record<RunStatus, string> = {
 
 const PIPELINE_STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Queued',
+  scheduled: 'Scheduled',
   running: 'Running',
   awaiting_user: 'Awaiting Review',
   awaiting_oauth: 'Needs Reconnect',
@@ -111,6 +113,7 @@ type RunSummary = {
 
 const STATUS_DOT: Record<RunStatus, string> = {
   pending: 'bg-amber-400',
+  scheduled: 'bg-amber-400',
   running: 'bg-blue-400 animate-pulse',
   awaiting_user: 'bg-purple-400 animate-pulse',
   awaiting_oauth: 'bg-red-400',
@@ -121,6 +124,7 @@ const STATUS_DOT: Record<RunStatus, string> = {
 
 const STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Queued',
+  scheduled: 'Scheduled',
   running: 'Running',
   awaiting_user: 'Waiting',
   awaiting_oauth: 'Needs reconnect',
@@ -223,18 +227,31 @@ export default function WorkflowRunsSection() {
   const { runId } = useParams<{ runId?: string }>();
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useLocalStorage('workflowRunsExpanded', true);
   const [pipeline, setPipeline] = useState<PipelineData | null>(null);
 
   useEffect(() => {
     if (!token) return;
     setLoading(true);
+    setRunsError(null);
     fetch('/api/aivion/workflow/runs?limit=50', {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((r) => (r.ok ? r.json() : []))
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        setRunsError(
+          r.status === 401
+            ? 'This session is missing a Clerk openidId. Sign out and sign back in.'
+            : 'Unable to load workflow runs.',
+        );
+        return [];
+      })
       .then(setRuns)
-      .catch(() => setRuns([]))
+      .catch(() => {
+        setRunsError('Unable to load workflow runs.');
+        setRuns([]);
+      })
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -474,7 +491,11 @@ export default function WorkflowRunsSection() {
           )}
 
           {!loading && runs.length === 0 && (
-            <p className="px-4 text-xs text-text-secondary">No runs yet.</p>
+            <div className="px-4">
+              <p className="text-xs text-text-secondary">
+                {runsError ?? 'No runs yet.'}
+              </p>
+            </div>
           )}
 
           {!loading &&

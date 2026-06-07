@@ -8,6 +8,13 @@ const multer = require('multer');
 const FormData = require('form-data');
 const axios = require('axios');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
+const {
+  loadWorkflowAssistPrompt,
+  loadWorkflowContextData,
+  resolveAssistModel,
+  invalidateWorkflowContextCache,
+} = require('~/server/utils/workflowPrompt');
+const { buildWorkflowActions } = require('~/server/utils/workflowActions');
 
 const router = express.Router();
 router.use(requireJwtAuth);
@@ -18,10 +25,21 @@ const BACKEND_URL = process.env.SHERU_BACKEND_URL || 'http://sheru-platform-back
 const WORKFLOW_URL = process.env.SHERU_WORKFLOW_URL || 'http://sheru-platform-workflow:8004';
 const SERVICE_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || 'dev-internal-token-rotate-me';
 
+function getWorkflowUserId(req) {
+  const userId = req.user?.openidId || req.user?.id;
+  if (!userId) {
+    const err = new Error('Workflow access requires a user identity');
+    err.statusCode = 401;
+    throw err;
+  }
+  return userId;
+}
+
 function serviceHeaders(req) {
+  const userId = getWorkflowUserId(req);
   return {
     Authorization: `Bearer ${SERVICE_TOKEN}`,
-    'X-User-Id': req.user?.openidId || req.user?.id || 'unknown',
+    'X-User-Id': userId,
     'Content-Type': 'application/json',
   };
 }
@@ -40,7 +58,7 @@ router.get('/runs', async (req, res) => {
     );
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -53,7 +71,7 @@ router.get('/workflows', async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -67,7 +85,7 @@ router.get('/workflows/:workflowId', async (req, res) => {
     );
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -80,7 +98,82 @@ router.post('/runs', async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// GET /api/aivion/workflow/schedules → sheru-platform-workflow /v1/workflow-schedules
+router.get('/schedules', async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.workflow_id) params.set('workflow_id', req.query.workflow_id);
+    const { data } = await axios.get(
+      `${WORKFLOW_URL}/v1/workflow-schedules?${params}`,
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/schedules → sheru-platform-workflow /v1/workflow-schedules
+router.post('/schedules', async (req, res) => {
+  try {
+    const { data } = await axios.post(`${WORKFLOW_URL}/v1/workflow-schedules`, req.body, {
+      headers: serviceHeaders(req),
+    });
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// GET /api/aivion/workflow/schedules/:scheduleId/runs → sheru-platform-workflow /v1/workflow-schedules/:scheduleId/runs
+router.get('/schedules/:scheduleId/runs', async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.limit) params.set('limit', req.query.limit);
+    const { data } = await axios.get(
+      `${WORKFLOW_URL}/v1/workflow-schedules/${req.params.scheduleId}/runs?${params}`,
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/schedules/:scheduleId/pause
+router.post('/schedules/:scheduleId/pause', async (req, res) => {
+  try {
+    const { data } = await axios.post(
+      `${WORKFLOW_URL}/v1/workflow-schedules/${req.params.scheduleId}/pause`,
+      {},
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/schedules/:scheduleId/resume
+router.post('/schedules/:scheduleId/resume', async (req, res) => {
+  try {
+    const { data } = await axios.post(
+      `${WORKFLOW_URL}/v1/workflow-schedules/${req.params.scheduleId}/resume`,
+      {},
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -93,7 +186,7 @@ router.get('/runs/:runId', async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -108,8 +201,107 @@ router.post('/runs/:runId/resume', async (req, res) => {
     );
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/runs/:runId/cancel
+router.post('/runs/:runId/cancel', async (req, res) => {
+  try {
+    const { data } = await axios.post(
+      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/cancel`,
+      {},
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/runs/:runId/recover
+router.post('/runs/:runId/recover', async (req, res) => {
+  try {
+    const { data } = await axios.post(
+      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/recover`,
+      req.body ?? {},
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// GET /api/aivion/workflow/runs/:runId/play-events → artifact play audit trail
+router.get('/runs/:runId/play-events', async (req, res) => {
+  try {
+    const { data } = await axios.get(
+      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/play-events`,
+      { headers: serviceHeaders(req) },
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// GET /api/aivion/workflow/runs/:runId/steps/:stepId/file → workflow service redirect
+router.get('/runs/:runId/steps/:stepId/file', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/steps/${req.params.stepId}/file`,
+      {
+        headers: serviceHeaders(req),
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+      },
+    );
+
+    if (response.status >= 300 && response.status < 400 && response.headers.location) {
+      res.status(response.status).set('Location', response.headers.location).end();
+      return;
+    }
+
+    res.status(response.status).send(response.data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/runs/:runId/artifacts/:stepId/actions/:action
+router.post('/runs/:runId/artifacts/:stepId/actions/:action', async (req, res) => {
+  try {
+    const { data } = await axios.post(
+      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/artifacts/${req.params.stepId}/actions/${req.params.action}`,
+      req.body,
+      { headers: serviceHeaders(req) },
+    );
+
+    if (req.params.action === 'regenerate_item') {
+      try {
+        const { data: run } = await axios.get(
+          `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}`,
+          { headers: serviceHeaders(req) },
+        );
+        if (run?.workflow_id) {
+          invalidateWorkflowContextCache(run.workflow_id, req.params.runId);
+        }
+      } catch (_) {
+        /* cache invalidation is best-effort */
+      }
+    }
+
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    const detail = err.response?.data?.detail ?? err.response?.data ?? 'upstream error';
+    res.status(status).json({ error: detail });
   }
 });
 
@@ -126,7 +318,20 @@ router.post('/uploads', upload.single('file'), async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    res.status(status).json({ error: err.response?.data ?? 'upstream error' });
+  }
+});
+
+// POST /api/aivion/workflow/datasets/inspect → sheru-platform-workflow /v1/datasets/inspect
+router.post('/datasets/inspect', async (req, res) => {
+  try {
+    const { data } = await axios.post(`${WORKFLOW_URL}/v1/datasets/inspect`, req.body, {
+      headers: serviceHeaders(req),
+    });
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -139,7 +344,7 @@ router.get('/runs/:runId/stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  const userId = req.user?.openidId || req.user?.id || 'unknown';
+  const userId = getWorkflowUserId(req);
   try {
     const upstream = await axios.get(
       `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/stream`,
@@ -169,7 +374,7 @@ router.get('/connections', async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
@@ -184,80 +389,119 @@ router.post('/connections/:service/initiate', async (req, res) => {
     );
     res.json(data);
   } catch (err) {
-    const status = err.response?.status ?? 502;
+    const status = err.statusCode ?? err.response?.status ?? 502;
     res.status(status).json({ error: err.response?.data ?? 'upstream error' });
   }
 });
 
-// POST /api/aivion/workflow/runs/:runId/chat → sheru-platform-workflow /v1/workflow-runs/:runId/chat
-router.post('/runs/:runId/chat', async (req, res) => {
-  try {
-    const { data } = await axios.post(
-      `${WORKFLOW_URL}/v1/workflow-runs/${req.params.runId}/chat`,
-      req.body,
-      { headers: serviceHeaders(req) },
-    );
-    res.json(data);
-  } catch (err) {
-    const status = err.response?.status ?? 502;
-    const detail = err.response?.data?.detail ?? err.response?.data ?? 'upstream error';
-    res.status(status).json({ error: detail });
-  }
+// Deprecated — use POST /assist with { workflow_id, run_id, messages }
+router.post('/runs/:runId/chat', (_req, res) => {
+  res.status(410).json({
+    error: 'deprecated',
+    message: 'Use POST /api/aivion/workflow/assist with { workflow_id, run_id, messages }',
+  });
 });
 
-// POST /api/aivion/workflow/assist → aivion-router-gateway /internal/llm/collect (billed per user VK)
+// POST /api/aivion/workflow/assist → gate-scoped copilot via /internal/llm/collect
 router.post('/assist', async (req, res) => {
   const rawGateway = process.env.AIVION_ROUTER_BASE_URL || 'http://aivion-router-gateway:8003';
   const GATEWAY_URL = rawGateway.replace(/\/v\d+\/?$/, '');
-  const clerkUserId = req.user?.openidId || req.user?.id || null;
 
   try {
-    const { messages = [], context, runId } = req.body;
+    const clerkUserId = getWorkflowUserId(req);
+    const { messages = [], workflow_id: workflowId, run_id: runId } = req.body;
 
-    // Resolve org_slug for billing — needed by /internal/llm/collect
-    let orgSlug = null;
-    if (clerkUserId) {
-      try {
-        const { data: me } = await axios.get(
-          `${BACKEND_URL}/admin/api/v1/workspace/me`,
-          { headers: serviceHeaders(req) },
-        );
-        orgSlug = me.org_slug ?? null;
-      } catch (_) { /* fall through — unbilled if org unresolvable */ }
+    if (!workflowId || !runId) {
+      return res.status(400).json({ error: 'missing_scope' });
     }
 
-    // Build a single prompt string from the conversation
-    const system = context
-      ? `You are an AI assistant scoped strictly to this workflow run. Answer only questions about the candidate, the AI assessment, fit score, strengths, gaps, red flags, or what action the recruiter should take next. Politely decline any question not related to this workflow run.\n\nRun context:\n${context}`
-      : 'You are an AI assistant for workflow runs. Answer only questions about workflow runs, candidates, assessments, and HR best practices. Politely decline unrelated questions.';
+    const { workflow, runSnapshot: run } = await loadWorkflowContextData(workflowId, {
+      userId: clerkUserId,
+      runId,
+      bypassCache: true,
+    });
+
+    if (!run) {
+      return res.status(404).json({ error: 'run_not_found' });
+    }
+
+    if (run.workflow_id !== workflowId) {
+      return res.status(403).json({ error: 'run_workflow_mismatch' });
+    }
+
+    if (run.status !== 'awaiting_user') {
+      return res.status(409).json({ error: 'chat_unavailable' });
+    }
+
+    const system = await loadWorkflowAssistPrompt(workflowId, {
+      userId: clerkUserId,
+      runId,
+      workflow,
+      runSnapshot: run,
+    });
+
     const history = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-20)
       .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
       .join('\n');
-    const prompt = `${system}\n\nConversation:\n${history}`;
+    const prompt = history ? `${system}\n\nConversation:\n${history}` : system;
 
-    const payload = {
-      prompt,
-      product: orgSlug || 'sheru',
-      team_slug: orgSlug || null,
-      clerk_user_id: clerkUserId || null,
-      workflow_run_id: runId || null,
-    };
+    let orgSlug = null;
+    try {
+      const { data: me } = await axios.get(`${BACKEND_URL}/admin/api/v1/workspace/me`, {
+        headers: serviceHeaders(req),
+      });
+      orgSlug = me.org_slug ?? null;
+    } catch (_) {
+      /* fall through — unbilled if org unresolvable */
+    }
+
+    const model = resolveAssistModel(workflow, run);
 
     const { data } = await axios.post(
       `${GATEWAY_URL}/internal/llm/collect`,
-      payload,
+      {
+        prompt,
+        model,
+        product: orgSlug || 'sheru',
+        team_slug: orgSlug || null,
+        clerk_user_id: clerkUserId,
+        workflow_run_id: runId,
+      },
       {
         headers: {
           Authorization: `Bearer ${SERVICE_TOKEN}`,
           'Content-Type': 'application/json',
         },
-        timeout: 30000,
+        timeout: 60000,
       },
     );
-    res.json({ reply: data.text ?? '' });
+
+    const reply = String(data.text ?? '').trim();
+    if (!reply) {
+      return res.status(502).json({
+        error: 'empty_reply',
+        message: 'The AI returned an empty response. Try again.',
+      });
+    }
+
+    const latestUserMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === 'user')?.content;
+    const actions = buildWorkflowActions(run, {
+      userMessage: typeof latestUserMessage === 'string' ? latestUserMessage : '',
+    });
+    res.json({ reply, actions });
   } catch (err) {
-    res.status(502).json({ error: err.response?.data?.detail ?? 'AI service unavailable' });
+    const status = err.statusCode ?? err.response?.status ?? 502;
+    const detail =
+      err.response?.data?.detail ??
+      err.response?.data?.message ??
+      err.response?.data?.error ??
+      err.message ??
+      'AI service unavailable';
+    res.status(status).json({ error: detail });
   }
 });
 

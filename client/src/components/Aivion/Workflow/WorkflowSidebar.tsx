@@ -13,6 +13,7 @@ type RunSummary = {
 
 const STATUS_DOT: Record<RunStatus, string> = {
   pending: 'bg-amber-400',
+  scheduled: 'bg-amber-400',
   running: 'bg-blue-400 animate-pulse',
   awaiting_user: 'bg-purple-400 animate-pulse',
   awaiting_oauth: 'bg-red-400',
@@ -23,6 +24,7 @@ const STATUS_DOT: Record<RunStatus, string> = {
 
 const STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Queued',
+  scheduled: 'Scheduled',
   running: 'Running',
   awaiting_user: 'Waiting',
   awaiting_oauth: 'Needs reconnect',
@@ -56,15 +58,29 @@ export default function WorkflowSidebar() {
   const { runId } = useParams<{ id?: string; runId?: string }>();
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
+    setLoading(true);
+    setError(null);
     fetch('/api/aivion/workflow/runs?limit=30', {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((r) => (r.ok ? r.json() : []))
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        setError(
+          r.status === 401
+            ? 'This session is missing a Clerk openidId. Sign out and sign back in.'
+            : 'Unable to load workflow runs.',
+        );
+        return [];
+      })
       .then(setRuns)
-      .catch(() => setRuns([]))
+      .catch(() => {
+        setError('Unable to load workflow runs.');
+        setRuns([]);
+      })
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -84,7 +100,11 @@ export default function WorkflowSidebar() {
         )}
 
         {!loading && runs.length === 0 && (
-          <p className="px-4 text-xs text-text-secondary">No runs yet.</p>
+          <div className="px-4">
+            <p className="text-xs text-text-secondary">
+              {error ?? 'No runs yet.'}
+            </p>
+          </div>
         )}
 
         {!loading && runs.map((run) => {

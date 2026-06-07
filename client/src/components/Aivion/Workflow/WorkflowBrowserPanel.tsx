@@ -19,6 +19,10 @@ const STEP_BADGE: Record<string, string> = {
   llm: 'AI',
   file_extract: 'Extract',
   user_input: 'Review Gate',
+  draft_articles: 'Draft',
+  revise_articles: 'Revise',
+  package_publication: 'Package',
+  publish_publication_http: 'Dispatch',
   integration: 'Integration',
   loop: 'Loop',
   template: 'Template',
@@ -26,6 +30,7 @@ const STEP_BADGE: Record<string, string> = {
 
 const STATUS_DOT: Record<RunStatus, string> = {
   pending: 'bg-amber-400',
+  scheduled: 'bg-amber-400',
   running: 'bg-blue-400 animate-pulse',
   awaiting_user: 'bg-purple-400 animate-pulse',
   awaiting_oauth: 'bg-red-400',
@@ -36,6 +41,7 @@ const STATUS_DOT: Record<RunStatus, string> = {
 
 const STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Queued',
+  scheduled: 'Scheduled',
   running: 'Running',
   awaiting_user: 'Awaiting Review',
   awaiting_oauth: 'Needs Reconnect',
@@ -74,28 +80,54 @@ export default function WorkflowBrowserPanel() {
   const [workflows, setWorkflows] = useState<WfSummary[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [currentRun, setCurrentRun] = useState<RunSummary | null>(null);
   const [wfSteps, setWfSteps] = useState<WorkflowStep[]>([]);
 
   useEffect(() => {
     if (!token) return;
+    setLoading(true);
+    setRunsError(null);
     Promise.all([
-      fetch('/api/aivion/workflow/workflows', { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => (r.ok ? r.json() : [])),
-      fetch('/api/aivion/workflow/runs?limit=20', { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => (r.ok ? r.json() : [])),
+      fetch('/api/aivion/workflow/workflows', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => (r.ok ? r.json() : [])),
+      fetch('/api/aivion/workflow/runs?limit=20', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then(async (r) => {
+        if (r.ok) return r.json();
+        setRunsError(
+          r.status === 401
+            ? 'This session is missing a Clerk openidId. Sign out and sign back in.'
+            : 'Unable to load recent runs.',
+        );
+        return [];
+      }),
     ])
-      .then(([wfs, rs]) => { setWorkflows(wfs); setRuns(rs); })
-      .catch(() => null)
+      .then(([wfs, rs]) => {
+        setWorkflows(wfs);
+        setRuns(rs);
+      })
+      .catch(() => {
+        setRunsError('Unable to load recent runs.');
+      })
       .finally(() => setLoading(false));
   }, [token]);
 
   // When on a run page, resolve the run — from cache or a targeted fetch
   useEffect(() => {
-    if (!activeRunId || !token) { setCurrentRun(null); return; }
+    if (!activeRunId || !token) {
+      setCurrentRun(null);
+      return;
+    }
     const cached = runs.find((r) => r.id === activeRunId);
-    if (cached) { setCurrentRun(cached); return; }
-    fetch(`/api/aivion/workflow/runs/${activeRunId}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (cached) {
+      setCurrentRun(cached);
+      return;
+    }
+    fetch(`/api/aivion/workflow/runs/${activeRunId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => setCurrentRun(data))
       .catch(() => null);
@@ -107,9 +139,13 @@ export default function WorkflowBrowserPanel() {
     const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
     if (TERMINAL.has(currentRun.status)) return;
     const id = setInterval(() => {
-      fetch(`/api/aivion/workflow/runs/${activeRunId}`, { headers: { Authorization: `Bearer ${token}` } })
+      fetch(`/api/aivion/workflow/runs/${activeRunId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
         .then((r) => (r.ok ? r.json() : null))
-        .then((data) => { if (data) setCurrentRun(data); })
+        .then((data) => {
+          if (data) setCurrentRun(data);
+        })
         .catch(() => null);
     }, 4000);
     return () => clearInterval(id);
@@ -117,8 +153,13 @@ export default function WorkflowBrowserPanel() {
 
   // Fetch workflow steps when entering a run page
   useEffect(() => {
-    if (!activeWorkflowId || !token) { setWfSteps([]); return; }
-    fetch(`/api/aivion/workflow/workflows/${activeWorkflowId}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!activeWorkflowId || !token) {
+      setWfSteps([]);
+      return;
+    }
+    fetch(`/api/aivion/workflow/workflows/${activeWorkflowId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((wf) => {
         const steps: WorkflowStep[] = (wf?.spec?.steps ?? []).filter(
@@ -150,11 +191,19 @@ export default function WorkflowBrowserPanel() {
         <div className="flex items-center justify-between px-3 py-3">
           <button
             type="button"
-            onClick={() => navigate(activeWorkflowId ? `/workflow/${activeWorkflowId}` : '/workflow')}
+            onClick={() =>
+              navigate(activeWorkflowId ? `/workflow/${activeWorkflowId}` : '/workflow')
+            }
             className="flex items-center gap-1.5 text-xs text-text-secondary transition-colors hover:text-text-primary"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d="M15 18l-6-6 6-6"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
             All Runs
           </button>
@@ -163,8 +212,12 @@ export default function WorkflowBrowserPanel() {
         {/* Workflow label */}
         {activeWf && (
           <div className="flex items-center gap-2 px-3 pb-2">
-            <span className="text-base leading-none" aria-hidden>{activeWf.icon ?? '⚡'}</span>
-            <span className="truncate text-sm font-semibold text-text-primary">{activeWf.name}</span>
+            <span className="text-base leading-none" aria-hidden>
+              {activeWf.icon ?? '⚡'}
+            </span>
+            <span className="truncate text-sm font-semibold text-text-primary">
+              {activeWf.name}
+            </span>
           </div>
         )}
 
@@ -172,15 +225,25 @@ export default function WorkflowBrowserPanel() {
         {currentRun && (
           <div className="mx-3 mb-3 rounded-lg border border-border-light bg-surface-primary p-3">
             <div className="flex items-center gap-2">
-              <span className={cn('h-2 w-2 shrink-0 rounded-full', STATUS_DOT[currentRun.status] ?? 'bg-surface-tertiary')} />
-              <span className="text-xs font-medium text-text-primary">{STATUS_LABEL[currentRun.status]}</span>
+              <span
+                className={cn(
+                  'h-2 w-2 shrink-0 rounded-full',
+                  STATUS_DOT[currentRun.status] ?? 'bg-surface-tertiary',
+                )}
+              />
+              <span className="text-xs font-medium text-text-primary">
+                {STATUS_LABEL[currentRun.status]}
+              </span>
             </div>
-            <p className="mt-1 text-[10px] text-text-secondary">{relativeTime(currentRun.created_at)}</p>
+            <p className="mt-1 text-[10px] text-text-secondary">
+              {relativeTime(currentRun.created_at)}
+            </p>
           </div>
         )}
 
         {/* Pipeline steps when running/pending; inputs otherwise */}
-        {(currentRun?.status === 'running' || currentRun?.status === 'pending') && wfSteps.length > 0 ? (
+        {(currentRun?.status === 'running' || currentRun?.status === 'pending') &&
+        wfSteps.length > 0 ? (
           <div className="flex-1 overflow-y-auto px-3 pb-3">
             <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
               Pipeline · {wfSteps.length} steps
@@ -196,35 +259,57 @@ export default function WorkflowBrowserPanel() {
                 return (
                   <li key={step.id} className="flex gap-2">
                     <div className="flex w-5 shrink-0 flex-col items-center">
-                      <div className={cn(
-                        'flex h-5 w-5 items-center justify-center rounded-full border-2 text-[9px] font-bold transition-colors',
-                        state === 'done' ? 'border-green-500 bg-green-500 text-white' :
-                        state === 'running' ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30' :
-                        'border-border-light bg-surface-primary text-text-tertiary',
-                      )}>
-                        {state === 'done' ? '✓' :
-                         state === 'running' ? <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" /> :
-                         i + 1}
+                      <div
+                        className={cn(
+                          'flex h-5 w-5 items-center justify-center rounded-full border-2 text-[9px] font-bold transition-colors',
+                          state === 'done'
+                            ? 'border-green-500 bg-green-500 text-white'
+                            : state === 'running'
+                              ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30'
+                              : 'border-border-light bg-surface-primary text-text-tertiary',
+                        )}
+                      >
+                        {state === 'done' ? (
+                          '✓'
+                        ) : state === 'running' ? (
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+                        ) : (
+                          i + 1
+                        )}
                       </div>
                       {i < wfSteps.length - 1 && (
-                        <div className={cn('my-0.5 w-px flex-1', isDone ? 'bg-green-300 dark:bg-green-700' : 'bg-border-light')} style={{ minHeight: 8 }} />
+                        <div
+                          className={cn(
+                            'my-0.5 w-px flex-1',
+                            isDone ? 'bg-green-300 dark:bg-green-700' : 'bg-border-light',
+                          )}
+                          style={{ minHeight: 8 }}
+                        />
                       )}
                     </div>
                     <div className={i < wfSteps.length - 1 ? 'pb-2.5' : ''}>
-                      <p className={cn(
-                        'text-[10px] font-bold uppercase tracking-wider',
-                        state === 'running' ? 'text-blue-600 dark:text-blue-400' :
-                        state === 'done' ? 'text-green-600 dark:text-green-400' :
-                        'text-text-tertiary',
-                      )}>
+                      <p
+                        className={cn(
+                          'text-[10px] font-bold uppercase tracking-wider',
+                          state === 'running'
+                            ? 'text-blue-600 dark:text-blue-400'
+                            : state === 'done'
+                              ? 'text-green-600 dark:text-green-400'
+                              : 'text-text-tertiary',
+                        )}
+                      >
                         {STEP_BADGE[step.type] ?? step.type}
                       </p>
-                      <p className={cn(
-                        'text-xs leading-tight',
-                        state === 'running' ? 'font-semibold text-text-primary' :
-                        state === 'done' ? 'text-text-tertiary' :
-                        'text-text-secondary',
-                      )}>
+                      <p
+                        className={cn(
+                          'text-xs leading-tight',
+                          state === 'running'
+                            ? 'font-semibold text-text-primary'
+                            : state === 'done'
+                              ? 'text-text-tertiary'
+                              : 'text-text-secondary',
+                        )}
+                      >
                         {step.label ?? step.id.replace(/_/g, ' ')}
                       </p>
                     </div>
@@ -235,24 +320,51 @@ export default function WorkflowBrowserPanel() {
           </div>
         ) : inputEntries.length > 0 ? (
           <div className="flex-1 overflow-y-auto px-3 pb-3">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">Inputs</p>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+              Inputs
+            </p>
             <div className="space-y-2.5">
               {inputEntries.map(([key, value]) => {
                 const strVal = String(value);
-                const isFile = /\.(pdf|docx?|txt|csv|xlsx?)$/i.test(strVal) || strVal.startsWith('uploads/');
+                const isFile =
+                  /\.(pdf|docx?|txt|csv|xlsx?)$/i.test(strVal) || strVal.startsWith('uploads/');
                 const isSkill = /skill|tech|stack|technolog/i.test(key);
                 if (isFile) {
                   const fileName = strVal.split('/').pop() ?? strVal;
-                  const display = fileName.length > 22 ? fileName.slice(0, 9) + '…' + fileName.slice(-9) : fileName;
+                  const display =
+                    fileName.length > 22
+                      ? fileName.slice(0, 9) + '…' + fileName.slice(-9)
+                      : fileName;
                   return (
                     <div key={key}>
                       <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
                       <div className="mt-0.5 flex items-center gap-1.5 rounded-md border border-border-light bg-surface-secondary px-2 py-1">
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" className="shrink-0 text-text-secondary" aria-hidden>
-                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                          <polyline points="14 2 14 8 20 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        <svg
+                          width="10"
+                          height="10"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          className="shrink-0 text-text-secondary"
+                          aria-hidden
+                        >
+                          <path
+                            d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          <polyline
+                            points="14 2 14 8 20 8"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
                         </svg>
-                        <span className="truncate text-[10px] font-medium text-text-secondary">{display}</span>
+                        <span className="truncate text-[10px] font-medium text-text-secondary">
+                          {display}
+                        </span>
                       </div>
                     </div>
                   );
@@ -264,7 +376,10 @@ export default function WorkflowBrowserPanel() {
                       <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {skills.map((skill) => (
-                          <span key={skill} className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                          <span
+                            key={skill}
+                            className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                          >
                             {skill}
                           </span>
                         ))}
@@ -275,7 +390,9 @@ export default function WorkflowBrowserPanel() {
                 return (
                   <div key={key}>
                     <p className="text-[10px] text-text-tertiary">{formatKey(key)}</p>
-                    <p className="mt-0.5 text-xs font-medium leading-snug text-text-primary">{strVal}</p>
+                    <p className="mt-0.5 text-xs font-medium leading-snug text-text-primary">
+                      {strVal}
+                    </p>
                   </div>
                 );
               })}
@@ -291,7 +408,12 @@ export default function WorkflowBrowserPanel() {
               className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-600"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                <path
+                  d="M12 5v14M5 12h14"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
               </svg>
               New Run
             </Link>
@@ -315,7 +437,12 @@ export default function WorkflowBrowserPanel() {
           title="Browse all workflows"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M3 12h18M3 6h18M3 18h18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <path
+              d="M3 12h18M3 6h18M3 18h18"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
           </svg>
         </Link>
       </div>
@@ -326,7 +453,7 @@ export default function WorkflowBrowserPanel() {
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent text-text-secondary" />
           </div>
         ) : recentRuns.length === 0 ? (
-          <p className="px-3 py-4 text-xs text-text-secondary">No runs yet.</p>
+          <p className="px-3 py-4 text-xs text-text-secondary">{runsError ?? 'No runs yet.'}</p>
         ) : (
           <>
             <div className="px-3 py-1">
@@ -342,10 +469,17 @@ export default function WorkflowBrowserPanel() {
                     onClick={() => navigate(`/workflow/${run.workflow_id}/runs/${run.id}`)}
                     className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
                   >
-                    <span className={cn('mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full', STATUS_DOT[run.status] ?? 'bg-surface-tertiary')} />
+                    <span
+                      className={cn(
+                        'mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full',
+                        STATUS_DOT[run.status] ?? 'bg-surface-tertiary',
+                      )}
+                    />
                     <div className="min-w-0">
                       <p className="truncate text-xs font-medium leading-tight">{runTitle(run)}</p>
-                      <p className="text-[10px] text-text-secondary">{relativeTime(run.created_at)}</p>
+                      <p className="text-[10px] text-text-secondary">
+                        {relativeTime(run.created_at)}
+                      </p>
                     </div>
                   </button>
                 </li>
@@ -362,7 +496,12 @@ export default function WorkflowBrowserPanel() {
             className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-600"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <path
+                d="M12 5v14M5 12h14"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
             </svg>
             New Run
           </Link>

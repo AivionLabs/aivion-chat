@@ -8,6 +8,9 @@ import ConvoIcon from '~/components/Endpoints/ConvoIcon';
 import { useLocalize, useAuthContext } from '~/hooks';
 import { getIconEndpoint, getEntity } from '~/utils';
 
+const WORKFLOW_AGENT_ID =
+  import.meta.env.VITE_WORKFLOW_ASSISTANT_AGENT_ID || 'agent_aOm_0GJj1WKvThsNxOSEb';
+
 const containerClassName =
   'shadow-stroke relative flex h-full items-center justify-center rounded-full bg-white dark:bg-presentation dark:text-white text-black dark:after:shadow-none ';
 
@@ -33,12 +36,16 @@ export default function Landing({ centerFormOnLanding }: { centerFormOnLanding: 
   const assistantMap = useAssistantsMapContext();
   const { data: startupConfig } = useGetStartupConfig();
   const { data: endpointsConfig } = useGetEndpointsQuery();
-  const { user } = useAuthContext();
+  const { user, token } = useAuthContext();
   const localize = useLocalize();
 
   const [textHasMultipleLines, setTextHasMultipleLines] = useState(false);
   const [lineCount, setLineCount] = useState(1);
   const [contentHeight, setContentHeight] = useState(0);
+  const [workflows, setWorkflows] = useState<
+    Array<{ id: string; name: string; description?: string; icon?: string; is_runnable?: boolean }>
+  >([]);
+  const [runs, setRuns] = useState<Array<{ workflow_id: string; status: string }>>([]);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const endpointType = useMemo(() => {
@@ -63,6 +70,51 @@ export default function Landing({ centerFormOnLanding }: { centerFormOnLanding: 
 
   const name = entity?.name ?? '';
   const description = (entity?.description || conversation?.greeting) ?? '';
+  const isWorkflowAssistant = conversation?.agent_id === WORKFLOW_AGENT_ID;
+
+  useEffect(() => {
+    if (!isWorkflowAssistant || !token) {
+      setWorkflows([]);
+      setRuns([]);
+      return;
+    }
+
+    Promise.all([
+      fetch('/api/aivion/workflow/workflows', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => (r.ok ? r.json() : [])),
+      fetch('/api/aivion/workflow/runs?limit=100', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => (r.ok ? r.json() : [])),
+    ])
+      .then(([wfs, rs]) => {
+        setWorkflows(Array.isArray(wfs) ? wfs : []);
+        setRuns(Array.isArray(rs) ? rs : []);
+      })
+      .catch(() => {
+        setWorkflows([]);
+        setRuns([]);
+      });
+  }, [isWorkflowAssistant, token]);
+
+  const workflowStats = useMemo(() => {
+    const pendingByWorkflow = new Map<string, number>();
+    for (const run of runs) {
+      if (run.status === 'awaiting_user') {
+        pendingByWorkflow.set(run.workflow_id, (pendingByWorkflow.get(run.workflow_id) ?? 0) + 1);
+      }
+    }
+    return workflows
+      .map((wf) => ({
+        ...wf,
+        pendingCount: pendingByWorkflow.get(wf.id) ?? 0,
+      }))
+      .sort((a, b) => {
+        const pendingDelta = (b.pendingCount ?? 0) - (a.pendingCount ?? 0);
+        if (pendingDelta !== 0) return pendingDelta;
+        return a.name.localeCompare(b.name);
+      });
+  }, [runs, workflows]);
 
   const getGreeting = useCallback(() => {
     if (typeof startupConfig?.interface?.customWelcome === 'string') {
@@ -203,6 +255,7 @@ export default function Landing({ centerFormOnLanding }: { centerFormOnLanding: 
             {description}
           </div>
         )}
+
       </div>
     </div>
   );

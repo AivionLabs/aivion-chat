@@ -15,8 +15,19 @@ from typing import Any
 
 import httpx
 
+from _env import load_local_env
+
 DEFAULT_BASE_URL = "http://localhost:3080"
 DEFAULT_TIMEOUT = 30.0
+
+load_local_env()
+
+
+def _normalize_bearer_token(value: str) -> str:
+    value = value.strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
 
 
 def _login(base_url: str, email: str, password: str) -> str:
@@ -49,7 +60,7 @@ class LibreChatAdmin:
         # Fall back to LIBRECHAT_API_KEY if set.
         email = os.environ.get("LIBRECHAT_EMAIL", "")
         password = os.environ.get("LIBRECHAT_PASSWORD", "")
-        key = api_key or os.environ.get("LIBRECHAT_API_KEY", "")
+        key = _normalize_bearer_token(api_key or os.environ.get("LIBRECHAT_API_KEY", ""))
 
         if email and password:
             key = _login(self.base_url, email, password)
@@ -71,6 +82,19 @@ class LibreChatAdmin:
             },
             timeout=DEFAULT_TIMEOUT,
         )
+
+    def _raise_auth_hint(self, action: str, response: httpx.Response) -> None:
+        if response.status_code != 401:
+            response.raise_for_status()
+
+        print(
+            f"error: {action} returned 401 Unauthorized.\n"
+            "LibreChat /api/agents is JWT-authenticated in this build, so a user API key is not enough.\n"
+            "Set LIBRECHAT_EMAIL + LIBRECHAT_PASSWORD for the platform/admin account instead, "
+            "or log in to LibreChat and use that session-derived JWT.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     def close(self) -> None:
         self.client.close()
@@ -94,7 +118,7 @@ class LibreChatAdmin:
 
     def list_agents(self) -> list[dict[str, Any]]:
         r = self.client.get("/api/agents")
-        r.raise_for_status()
+        self._raise_auth_hint("GET /api/agents", r)
         data = r.json()
         return data.get("data") or data if isinstance(data, list) else []
 
@@ -102,17 +126,17 @@ class LibreChatAdmin:
         r = self.client.get(f"/api/agents/{agent_id}")
         if r.status_code == 404:
             return None
-        r.raise_for_status()
+        self._raise_auth_hint(f"GET /api/agents/{agent_id}", r)
         return r.json()
 
     def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
         r = self.client.post("/api/agents", json=body)
-        r.raise_for_status()
+        self._raise_auth_hint("POST /api/agents", r)
         return r.json()
 
     def update_agent(self, agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
         r = self.client.patch(f"/api/agents/{agent_id}", json=body)
-        r.raise_for_status()
+        self._raise_auth_hint(f"PATCH /api/agents/{agent_id}", r)
         return r.json()
 
     def find_agent_by_name(self, name: str) -> dict[str, Any] | None:
@@ -132,3 +156,13 @@ class LibreChatAdmin:
         result = self.create_agent(body)
         print(f"  agent '{name}' created (id={result.get('id')})")
         return result
+
+    def list_agent_actions(self) -> list[dict[str, Any]]:
+        r = self.client.get("/api/agents/actions")
+        self._raise_auth_hint("GET /api/agents/actions", r)
+        data = r.json()
+        return data if isinstance(data, list) else data.get("data") or []
+
+    def delete_agent_action(self, agent_id: str, action_id: str) -> None:
+        r = self.client.delete(f"/api/agents/actions/{agent_id}/{action_id}")
+        self._raise_auth_hint(f"DELETE /api/agents/actions/{agent_id}/{action_id}", r)

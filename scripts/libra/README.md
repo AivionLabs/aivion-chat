@@ -29,9 +29,24 @@ pip install pymongo httpx pyyaml
 | `MONGO_URI` | `mongodb://localhost:27017` | LibreChat MongoDB connection string |
 | `LIBRECHAT_DB` | `LibreChat` | MongoDB database name |
 | `LIBRECHAT_URL` | `http://localhost:3081` | LibreChat base URL |
-| `LIBRECHAT_API_KEY` | (required) | Admin API key from LibreChat UI → Settings → API Keys |
+| `LIBRECHAT_EMAIL` | (required for onboarding) | LibreChat admin account email |
+| `LIBRECHAT_PASSWORD` | (required for onboarding) | LibreChat admin account password |
+| `LIBRECHAT_API_KEY` | optional | API key for routes that accept key auth; not used by `/api/agents` in this build |
 | `BIFROST_BASE_URL` | `http://localhost:8081` | Bifrost endpoint (for verify_tasks.py) |
 | `TASKS_YAML` | `<repo-root>/tasks.yaml` | Path to task catalog |
+
+The scripts also auto-load missing values from local `.env` / `.env.local`
+files in the current directory, the `scripts/libra/` directory, or the
+`aivion-chat/` repo root. Existing shell exports always win. Set
+`LIBRECHAT_ENV_FILE` to point at a specific env file if you want to override
+the default search path.
+
+For `onboard_workflow_agent.py`, the env file must include:
+
+```bash
+LIBRECHAT_EMAIL=you@example.com
+LIBRECHAT_PASSWORD=your-password
+```
 
 ## Recommended run order (Week 2 setup)
 

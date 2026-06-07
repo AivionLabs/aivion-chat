@@ -59,6 +59,11 @@ const loadWorkflowRun = () =>
     Component: m.default,
   }));
 
+const loadWorkflowChat = () =>
+  import('~/components/Aivion/Workflow/WorkflowChatWorkspace').then((m) => ({
+    Component: m.default,
+  }));
+
 const baseEl = document.querySelector('base');
 const baseHref = baseEl?.getAttribute('href') || '/';
 
@@ -199,6 +204,18 @@ export const router = createBrowserRouter(
                   lazy: loadWorkflowRun,
                 },
               ],
+            },
+            {
+              path: 'workflow-chat',
+              lazy: loadWorkflowChat,
+            },
+            {
+              path: 'workflow-chat/:id',
+              lazy: loadWorkflowChat,
+            },
+            {
+              path: 'workflow-chat/:id/runs/:runId',
+              lazy: loadWorkflowChat,
             },
             {
               path: 'connections',

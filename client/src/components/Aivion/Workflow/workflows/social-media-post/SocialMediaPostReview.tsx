@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import type { WorkflowReviewProps } from '../types';
-import { completedStepMap } from '../helpers';
+import type { WorkflowReviewProps } from '../../types';
+import { completedStepMap } from '../../helpers';
 
 interface SocialMediaPostSchema {
   type: 'social_media_post';

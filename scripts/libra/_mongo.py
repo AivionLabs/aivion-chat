@@ -10,8 +10,12 @@ import os
 import sys
 from typing import Any
 
+from _env import load_local_env
+
 DEFAULT_MONGO_URI = "mongodb://localhost:27017"
 DEFAULT_DB_NAME = "LibreChat"
+
+load_local_env()
 
 
 def get_db(uri: str | None = None, db_name: str | None = None) -> Any:

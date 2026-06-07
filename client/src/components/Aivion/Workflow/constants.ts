@@ -11,6 +11,7 @@ export const TAG_COLOR_CLASSES: Record<ReviewTagGroup['color'], { border: string
 
 export const STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Queued',
+  scheduled: 'Scheduled',
   running: 'Running',
   awaiting_user: 'Awaiting Review',
   awaiting_oauth: 'Needs Reconnect',
@@ -21,6 +22,7 @@ export const STATUS_LABEL: Record<RunStatus, string> = {
 
 export const STATUS_BADGE: Record<RunStatus, string> = {
   pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  scheduled: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
   running: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
   awaiting_user: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
   awaiting_oauth: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',

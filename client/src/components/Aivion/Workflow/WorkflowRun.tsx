@@ -1,26 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ComponentType } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useAuthContext } from '~/hooks/AuthContext';
 import type {
   Workflow,
+  WorkflowArtifact,
   WorkflowInputField,
   WorkflowRun,
   WorkflowReviewProps,
   WorkflowStep,
 } from './types';
-import { TAG_COLOR_CLASSES, STATUS_LABEL, STATUS_BADGE, REC_LABELS, REC_OPTS, PRIORITY_OPTS } from './constants';
+import {
+  TAG_COLOR_CLASSES,
+  STATUS_LABEL,
+  STATUS_BADGE,
+  REC_LABELS,
+  REC_OPTS,
+  PRIORITY_OPTS,
+} from './constants';
 import { completedStepMap, daysUntil, splitDots } from './helpers';
 import { useRunStream } from './useRunStream';
 import { ReportOutput, PendingPromptView, ResultFallback } from './ReportOutput';
 import { FitScoreRing } from './CandidateReview';
-import { CvScreeningReview } from './workflows/cv-screening';
-import { SocialMediaPostReview } from './workflows/social-media-post';
-
-const WORKFLOW_REVIEW: Record<string, ComponentType<WorkflowReviewProps>> = {
-  'cv-screening': CvScreeningReview,
-  'social-media-post': SocialMediaPostReview,
-};
+import { resolveWorkflowReviewComponent } from './workflows/registry';
+import WorkflowArtifactActions from './artifact-actions/WorkflowArtifactActions';
+import WorkflowFailedRecovery from './WorkflowFailedRecovery';
+import WorkflowPipelineVertical from './WorkflowPipelineVertical';
+import CompletedRunTimeline from './CompletedRunTimeline';
+import { buildCompletedRunTimeline } from './completed-run-timeline';
+import { useWorkflowPlayEvents } from './useWorkflowPlayEvents';
 
 export { STATUS_LABEL, STATUS_BADGE };
 
@@ -66,6 +73,42 @@ export default function WorkflowRunPage() {
 
   useRunStream(runId, token, streamKey, onUpdate, onDone);
 
+  const refreshRunSnapshot = useCallback(async () => {
+    if (!runId || !token) return;
+    const res = await fetch(`/api/aivion/workflow/runs/${runId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as WorkflowRun;
+    setRun((prev) => {
+      if (!prev) return data;
+      const merged: WorkflowRun = { ...prev, ...data };
+      if (data.outputs == null && prev.outputs != null) merged.outputs = prev.outputs;
+      if (data.pending_input_schema == null && prev.pending_input_schema != null) {
+        merged.pending_input_schema = prev.pending_input_schema;
+      }
+      if (data.pending_step_id == null && prev.pending_step_id != null) {
+        merged.pending_step_id = prev.pending_step_id;
+      }
+      if (data.pending_prompt == null && prev.pending_prompt != null) {
+        merged.pending_prompt = prev.pending_prompt;
+      }
+      return merged;
+    });
+    setStreamKey((k) => k + 1);
+  }, [runId, token]);
+
+  const workflowSteps = workflow?.spec?.steps ?? [];
+  const playEvents = useWorkflowPlayEvents(
+    runId,
+    token,
+    run?.status === 'completed',
+  );
+  const completedTimelineItems = useMemo(() => {
+    if (!run || run.status !== 'completed') return [];
+    return buildCompletedRunTimeline(run, workflowSteps, playEvents, workflow?.spec?.inputs);
+  }, [run, workflowSteps, playEvents, workflow?.spec?.inputs]);
+
   // Initial REST fetch — seeds full run state (including outputs + pending fields).
   // SSE alone can deliver partial pub/sub payloads that omit these fields.
   useEffect(() => {
@@ -97,11 +140,15 @@ export default function WorkflowRunPage() {
         if (!data) return;
         // Merge: keep pending_input_schema from in-memory so the review panel
         // stays visible even after the REST endpoint clears it on completion.
-        setRun((prev) => prev ? {
-          ...data,
-          pending_input_schema: prev.pending_input_schema ?? data.pending_input_schema,
-          pending_prompt: prev.pending_prompt ?? data.pending_prompt,
-        } : data);
+        setRun((prev) =>
+          prev
+            ? {
+                ...data,
+                pending_input_schema: prev.pending_input_schema ?? data.pending_input_schema,
+                pending_prompt: prev.pending_prompt ?? data.pending_prompt,
+              }
+            : data,
+        );
       })
       .catch(() => undefined);
   }, [run?.status, runId, token]);
@@ -113,7 +160,9 @@ export default function WorkflowRunPage() {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => (r.ok ? r.json() : null))
-      .then((wf: Workflow | null) => { if (wf) setWorkflow(wf); })
+      .then((wf: Workflow | null) => {
+        if (wf) setWorkflow(wf);
+      })
       .catch(() => undefined);
   }, [id, token]);
 
@@ -121,14 +170,14 @@ export default function WorkflowRunPage() {
   useEffect(() => {
     if (run?.status !== 'awaiting_user') return;
     const pendingSchema = run.pending_input_schema;
-    const schemaFields = pendingSchema &&
+    const schemaFields =
+      pendingSchema &&
       pendingSchema.type !== 'candidate_review_form' &&
-      pendingSchema.type !== 'social_media_post'
-      ? ((pendingSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? [])
-      : [];
-    const fields = schemaFields.filter(
-      (f) => (f.type as string) !== 'readonly',
-    );
+      pendingSchema.type !== 'social_media_post' &&
+      pendingSchema.type !== 'record_selection'
+        ? ((pendingSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? [])
+        : [];
+    const fields = schemaFields.filter((f) => (f.type as string) !== 'readonly');
     if (fields.length === 0) return;
     setResumeValues((prev) => {
       const seeded = { ...prev };
@@ -146,7 +195,10 @@ export default function WorkflowRunPage() {
   useEffect(() => {
     if (run?.status !== 'awaiting_user' || !run.pending_input_schema || !runId) return;
     try {
-      localStorage.setItem(`wf_review_${runId}`, JSON.stringify({ schema: run.pending_input_schema }));
+      localStorage.setItem(
+        `wf_review_${runId}`,
+        JSON.stringify({ schema: run.pending_input_schema }),
+      );
     } catch {}
   }, [run?.status, run?.pending_input_schema, runId]);
 
@@ -156,9 +208,9 @@ export default function WorkflowRunPage() {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
-        document.getElementById('review-gate-form')?.dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+        document
+          .getElementById('review-gate-form')
+          ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       }
     }
     window.addEventListener('keydown', onKey);
@@ -210,10 +262,64 @@ export default function WorkflowRunPage() {
     );
   }
 
-  const steps: WorkflowStep[] = workflow?.spec?.steps ?? [];
+  const steps: WorkflowStep[] = workflowSteps;
+  const activeRun = run;
+  const stepLabelMap = Object.fromEntries(
+    steps.map((step) => [step.id, step.label ?? step.id]),
+  ) as Record<string, string>;
   const done = completedStepMap(run);
   const currentStep = steps.find((s) => s.id === run.pending_step_id);
   const specOutput = workflow?.spec?.output;
+  const completedArtifacts: WorkflowArtifact[] = Object.entries(
+    (
+      run.outputs as {
+        _completed_steps?: Record<string, { output?: Record<string, unknown> }>;
+      } | null
+    )?._completed_steps ?? {},
+  ).flatMap(([stepId, stepData]) => {
+    const output = stepData?.output ?? {};
+    const artifact =
+      output.artifact && typeof output.artifact === 'object'
+        ? (output.artifact as Record<string, unknown>)
+        : null;
+    const fileUrl =
+      typeof output.file_url === 'string'
+        ? output.file_url
+        : typeof artifact?.file_url === 'string'
+          ? artifact.file_url
+          : '';
+    const storageKey =
+      typeof output.storage_key === 'string'
+        ? output.storage_key
+        : typeof artifact?.storage_key === 'string'
+          ? artifact.storage_key
+          : '';
+    const nestedFileName = typeof artifact?.file_name === 'string' ? artifact.file_name : '';
+    const nestedContentType =
+      typeof artifact?.content_type === 'string' ? artifact.content_type : '';
+    const nestedOutputFormat =
+      typeof artifact?.output_format === 'string' ? artifact.output_format : '';
+    const resolvedFileName =
+      typeof output.file_name === 'string' && output.file_name.trim()
+        ? output.file_name
+        : nestedFileName ||
+          (nestedOutputFormat.toLowerCase() === 'json' ? `${stepId}.json` : `${stepId}.csv`);
+    const resolvedContentType =
+      typeof output.content_type === 'string' && output.content_type
+        ? output.content_type
+        : nestedContentType ||
+          (nestedOutputFormat.toLowerCase() === 'json' ? 'application/json' : '');
+    if (!fileUrl) return [];
+    return [
+      {
+        stepId,
+        fileUrl,
+        storageKey,
+        fileName: resolvedFileName,
+        contentType: resolvedContentType,
+      },
+    ];
+  });
 
   // For completed runs: restore review schema from in-memory (SSE merge kept it)
   // or localStorage (page reload case). This lets the completed view show the
@@ -222,17 +328,29 @@ export default function WorkflowRunPage() {
   if (!effectiveSchema && runId) {
     try {
       const raw = localStorage.getItem(`wf_review_${runId}`);
-      if (raw) effectiveSchema = (JSON.parse(raw) as { schema: typeof run.pending_input_schema })?.schema ?? null;
+      if (raw)
+        effectiveSchema =
+          (JSON.parse(raw) as { schema: typeof run.pending_input_schema })?.schema ?? null;
     } catch {}
   }
 
   const isCandidateReview = effectiveSchema?.type === 'candidate_review_form';
   const isCustomReviewSchema = effectiveSchema?.type === 'social_media_post';
-  const CustomReview = workflow?.slug ? WORKFLOW_REVIEW[workflow.slug] : undefined;
+  const isRecordSelection = effectiveSchema?.type === 'record_selection';
+  const isArticleReview = effectiveSchema?.type === 'article_review';
+  const CustomReview = resolveWorkflowReviewComponent({
+    schemaType: effectiveSchema?.type,
+    workflowSlug: workflow?.slug,
+  });
 
-  const reviewAllFields = isCandidateReview || isCustomReviewSchema || !effectiveSchema
-    ? []
-    : ((effectiveSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? []);
+  const reviewAllFields =
+    isCandidateReview ||
+    isCustomReviewSchema ||
+    isRecordSelection ||
+    isArticleReview ||
+    !effectiveSchema
+      ? []
+      : ((effectiveSchema as { type: string; fields?: WorkflowInputField[] }).fields ?? []);
   const roFields = Object.fromEntries(
     reviewAllFields
       .filter((f) => (f.type as string) === 'readonly')
@@ -244,35 +362,133 @@ export default function WorkflowRunPage() {
   const aiRec = roFields[recField] && roFields[recField] !== '—' ? roFields[recField] : null;
 
   function fieldLabel(key: string): string {
-    return reviewAllFields.find((f) => f.name === key)?.label
-      ?? key.replace(/^_/, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    return (
+      reviewAllFields.find((f) => f.name === key)?.label ??
+      key
+        .replace(/^_/, '')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+    );
   }
 
-  const profileValues = (reviewDisplay?.profile_fields ?? []).map((key) =>
-    (roFields[key] && roFields[key] !== '—') ? roFields[key] : String(run.inputs?.[key] ?? ''),
-  ).filter(Boolean);
+  const profileValues = (reviewDisplay?.profile_fields ?? [])
+    .map((key) =>
+      roFields[key] && roFields[key] !== '—' ? roFields[key] : String(run.inputs?.[key] ?? ''),
+    )
+    .filter(Boolean);
   // Generic entity identity — profile_fields[0] is the primary title, [1] the subtitle (person, doc, contract, etc.)
   const entityName = profileValues[0] ?? '';
   const entitySubtitle = profileValues[1] ?? '';
-  const entityInitials = entityName.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const entityInitials = entityName
+    .split(' ')
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
 
   return (
     <div className="flex h-full overflow-hidden">
+      {/* ── Left: workflow info + pipeline (parity with the pre-run + running screens) ── */}
+      {steps.length > 0 && (
+        <aside className="hidden border-r border-border-light p-6 lg:flex lg:w-64 lg:shrink-0 lg:flex-col lg:overflow-y-auto">
+          <Link
+            to="/workflow"
+            className="inline-flex shrink-0 items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="m15 18-6-6 6-6"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            My Workflows
+          </Link>
+
+          <div className="mb-4 mt-6 flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+
+          {workflow?.name && (
+            <h1 className="text-xl font-bold text-text-primary">{workflow.name}</h1>
+          )}
+          {workflow?.description && (
+            <p className="mt-2 text-sm leading-relaxed text-text-secondary">
+              {workflow.description}
+            </p>
+          )}
+          <WorkflowPipelineVertical
+            run={run}
+            steps={steps}
+            showWorkflowMeta={false}
+            className="mt-8"
+          />
+        </aside>
+      )}
+
       {/* ── Main panel ──────────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col overflow-y-auto">
-
         {/* Running */}
         {run.status === 'running' && (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-            <svg className="h-12 w-12 animate-spin text-blue-500" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+            <svg
+              className="h-12 w-12 animate-spin text-blue-500"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                className="opacity-20"
+              />
               <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
             <div>
               <p className="text-base font-semibold text-text-primary">
                 {currentStep?.label ?? 'Processing…'}
               </p>
-              <p className="mt-1 text-sm text-text-secondary">Running step — this may take a moment</p>
+              <p className="mt-1 text-sm text-text-secondary">
+                Running step — this may take a moment
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Scheduled */}
+        {run.status === 'scheduled' && (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400">
+              <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path
+                  d="M8 2v4M16 2v4M3 10h18M5 6h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </div>
+            <div>
+              <p className="text-base font-semibold text-text-primary">Scheduled to start</p>
+              <p className="mt-1 text-sm text-text-secondary">
+                {run.scheduled_at
+                  ? `Queued for ${new Date(run.scheduled_at).toLocaleString()}`
+                  : 'Queued for later execution.'}
+              </p>
             </div>
           </div>
         )}
@@ -290,13 +506,25 @@ export default function WorkflowRunPage() {
           <div className="p-6 lg:p-8">
             <div className="rounded-xl border border-red-200 bg-red-50 p-5 dark:border-red-800 dark:bg-red-900/20">
               <div className="flex items-start gap-3">
-                <svg className="mt-0.5 h-5 w-5 shrink-0 text-red-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                <svg
+                  className="mt-0.5 h-5 w-5 shrink-0 text-red-500"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                    clipRule="evenodd"
+                  />
                 </svg>
                 <div>
-                  <p className="font-semibold text-red-800 dark:text-red-300">Service connection required</p>
+                  <p className="font-semibold text-red-800 dark:text-red-300">
+                    Service connection required
+                  </p>
                   <p className="mt-1 text-sm text-red-700 dark:text-red-400">
-                    A service this workflow needs is no longer connected. Reconnect it to resume the run.
+                    A service this workflow needs is no longer connected. Reconnect it to resume the
+                    run.
                   </p>
                   <Link
                     to="/connections"
@@ -315,24 +543,35 @@ export default function WorkflowRunPage() {
           <div className="flex-1">
             {/* ── Sticky decision bar ─────────────────────────────────────────── */}
             {reviewDisplay && (
-              <div className="sticky top-0 z-10 border-b border-border-light bg-surface-primary/95 px-5 py-3 backdrop-blur-sm lg:px-7">
+              <div className="bg-surface-primary/95 sticky top-0 z-10 border-b border-border-light px-5 py-3 backdrop-blur-sm lg:px-7">
                 <div className="flex items-center gap-3">
                   <div className="flex shrink-0 items-center gap-2">
                     {entityName && (
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                        <span className="text-xs font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
+                        <span className="text-xs font-bold text-amber-700 dark:text-amber-300">
+                          {entityInitials}
+                        </span>
                       </div>
                     )}
                     <div className="hidden min-w-0 sm:block">
-                      <p className="text-sm font-semibold leading-tight text-text-primary">{entityName || (workflow?.name ?? '')}</p>
+                      <p className="text-sm font-semibold leading-tight text-text-primary">
+                        {entityName || (workflow?.name ?? '')}
+                      </p>
                       {entitySubtitle && (
-                        <p className="max-w-[160px] truncate text-[11px] text-text-secondary">{entitySubtitle}</p>
+                        <p className="max-w-[160px] truncate text-[11px] text-text-secondary">
+                          {entitySubtitle}
+                        </p>
                       )}
                     </div>
                   </div>
-                  {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
-                    <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} size={52} />
-                  )}
+                  {reviewDisplay.score_field &&
+                    roFields[reviewDisplay.score_field] &&
+                    roFields[reviewDisplay.score_field] !== '—' && (
+                      <FitScoreRing
+                        score={parseFloat(roFields[reviewDisplay.score_field])}
+                        size={52}
+                      />
+                    )}
                   <div className="mx-1 h-8 w-px shrink-0 bg-border-light" />
                   {aiRec && (
                     <div className="flex shrink-0 items-center gap-2">
@@ -342,7 +581,13 @@ export default function WorkflowRunPage() {
                       </span>
                       <button
                         type="button"
-                        onClick={() => setResumeValues((p) => ({ ...p, final_recommendation: aiRec, priority: p['priority'] || 'medium' }))}
+                        onClick={() =>
+                          setResumeValues((p) => ({
+                            ...p,
+                            final_recommendation: aiRec,
+                            priority: p['priority'] || 'medium',
+                          }))
+                        }
                         className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
                       >
                         ✓ Accept
@@ -352,18 +597,32 @@ export default function WorkflowRunPage() {
                   <div className="flex-1" />
                   {resumeValues['final_recommendation'] && (
                     <span className="shrink-0 rounded-full bg-surface-secondary px-2.5 py-1 text-xs font-medium text-text-secondary">
-                      → {REC_LABELS[resumeValues['final_recommendation']] ?? resumeValues['final_recommendation']}
+                      →{' '}
+                      {REC_LABELS[resumeValues['final_recommendation']] ??
+                        resumeValues['final_recommendation']}
                     </span>
                   )}
                   <button
                     type="submit"
                     form="review-gate-form"
                     disabled={resuming || !resumeValues['final_recommendation']}
-                    className="shrink-0 flex items-center gap-1.5 rounded-xl bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex shrink-0 items-center gap-1.5 rounded-xl bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {resuming && (
-                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                      <svg
+                        className="h-4 w-4 animate-spin"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden
+                      >
+                        <circle
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          className="opacity-20"
+                        />
                         <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
                     )}
@@ -377,14 +636,33 @@ export default function WorkflowRunPage() {
             <div className="p-5 lg:p-7">
               {run.expires_at && (
                 <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300">
-                  <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                  <svg
+                    className="h-3.5 w-3.5 shrink-0"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    aria-hidden
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z"
+                      clipRule="evenodd"
+                    />
                   </svg>
-                  Expires in {daysUntil(run.expires_at)} day{daysUntil(run.expires_at) === 1 ? '' : 's'}
+                  Expires in {daysUntil(run.expires_at)} day
+                  {daysUntil(run.expires_at) === 1 ? '' : 's'}
                 </div>
               )}
 
-              {reviewDisplay ? (
+              {CustomReview ? (
+                <CustomReview
+                  run={run}
+                  workflow={workflow}
+                  runId={runId!}
+                  token={token!}
+                  onResumed={() => void refreshRunSnapshot()}
+                  onRunUpdated={refreshRunSnapshot}
+                />
+              ) : reviewDisplay ? (
                 <div className="space-y-4">
                   {/* Row 1: Profile + AI Assessment */}
                   <div className="grid grid-cols-2 gap-4">
@@ -393,7 +671,9 @@ export default function WorkflowRunPage() {
                         <div className="mb-4 flex items-center gap-3">
                           {entityName && (
                             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                              <span className="text-base font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
+                              <span className="text-base font-bold text-amber-700 dark:text-amber-300">
+                                {entityInitials}
+                              </span>
                             </div>
                           )}
                           <p className="text-xs font-semibold uppercase tracking-wider text-text-tertiary">
@@ -402,13 +682,16 @@ export default function WorkflowRunPage() {
                         </div>
                         <div className="space-y-3">
                           {reviewDisplay.profile_fields!.map((key) => {
-                            const value = roFields[key] && roFields[key] !== '—'
-                              ? roFields[key]
-                              : String(run.inputs?.[key] ?? '');
+                            const value =
+                              roFields[key] && roFields[key] !== '—'
+                                ? roFields[key]
+                                : String(run.inputs?.[key] ?? '');
                             return value ? (
                               <div key={key}>
                                 <p className="text-xs text-text-tertiary">{fieldLabel(key)}</p>
-                                <p className="mt-0.5 text-sm font-medium text-text-primary">{value}</p>
+                                <p className="mt-0.5 text-sm font-medium text-text-primary">
+                                  {value}
+                                </p>
                               </div>
                             ) : null;
                           })}
@@ -421,24 +704,34 @@ export default function WorkflowRunPage() {
                           {reviewDisplay.assessment_label ?? 'AI Assessment'}
                         </p>
                         <div className="flex items-start gap-4">
-                          {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
-                            <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} />
-                          )}
+                          {reviewDisplay.score_field &&
+                            roFields[reviewDisplay.score_field] &&
+                            roFields[reviewDisplay.score_field] !== '—' && (
+                              <FitScoreRing
+                                score={parseFloat(roFields[reviewDisplay.score_field])}
+                              />
+                            )}
                           <div className="min-w-0 flex-1 space-y-1.5">
-                            {reviewDisplay.assessment_fields!
-                              .filter((key) => key !== reviewDisplay.score_field)
+                            {reviewDisplay
+                              .assessment_fields!.filter((key) => key !== reviewDisplay.score_field)
                               .map((key, idx) => {
                                 const value = roFields[key];
                                 if (!value || value === '—') return null;
                                 if (idx > 0 && !assessmentExpanded) return null;
                                 return (
-                                  <p key={key} className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}>
+                                  <p
+                                    key={key}
+                                    className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}
+                                  >
                                     {value}
                                   </p>
                                 );
                               })}
                             {reviewDisplay.assessment_fields!.filter(
-                              (key) => key !== reviewDisplay.score_field && roFields[key] && roFields[key] !== '—',
+                              (key) =>
+                                key !== reviewDisplay.score_field &&
+                                roFields[key] &&
+                                roFields[key] !== '—',
                             ).length > 1 && (
                               <button
                                 type="button"
@@ -455,36 +748,49 @@ export default function WorkflowRunPage() {
                   </div>
 
                   {/* Row 2: Tag groups */}
-                  {(reviewDisplay.tag_groups?.length ?? 0) > 0 && (() => {
-                    const activeGroups = reviewDisplay.tag_groups!.filter(
-                      (g) => splitDots(roFields[g.field] ?? '').length > 0,
-                    );
-                    if (!activeGroups.length) return null;
-                    return (
-                      <div className="flex gap-4">
-                        {activeGroups.map((group) => {
-                          const items = splitDots(roFields[group.field] ?? '');
-                          const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
-                          return (
-                            <div key={group.field} className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}>
-                              <p className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}>
-                                {group.label}
-                              </p>
-                              <div className="flex flex-wrap gap-1.5">
-                                {items.map((item, i) => (
-                                  <span key={i} className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}>{item}</span>
-                                ))}
+                  {(reviewDisplay.tag_groups?.length ?? 0) > 0 &&
+                    (() => {
+                      const activeGroups = reviewDisplay.tag_groups!.filter(
+                        (g) => splitDots(roFields[g.field] ?? '').length > 0,
+                      );
+                      if (!activeGroups.length) return null;
+                      return (
+                        <div className="flex gap-4">
+                          {activeGroups.map((group) => {
+                            const items = splitDots(roFields[group.field] ?? '');
+                            const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
+                            return (
+                              <div
+                                key={group.field}
+                                className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}
+                              >
+                                <p
+                                  className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}
+                                >
+                                  {group.label}
+                                </p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {items.map((item, i) => (
+                                    <span
+                                      key={i}
+                                      className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}
+                                    >
+                                      {item}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
 
                   {/* Row 3: Decision form */}
                   <div className="rounded-xl border border-border-light bg-surface-primary p-5">
-                    <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Decision</p>
+                    <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                      Your Decision
+                    </p>
                     <form id="review-gate-form" onSubmit={handleResume} className="space-y-5">
                       {reviewEditFields.find((f) => f.name === 'final_recommendation') && (
                         <div>
@@ -498,7 +804,12 @@ export default function WorkflowRunPage() {
                                 <button
                                   key={opt.value}
                                   type="button"
-                                  onClick={() => setResumeValues((p) => ({ ...p, final_recommendation: opt.value }))}
+                                  onClick={() =>
+                                    setResumeValues((p) => ({
+                                      ...p,
+                                      final_recommendation: opt.value,
+                                    }))
+                                  }
                                   className={`rounded-full border px-3 py-1 text-xs font-medium transition-all ${
                                     selected
                                       ? opt.active + ' ring-2 ring-current ring-offset-1'
@@ -514,7 +825,9 @@ export default function WorkflowRunPage() {
                       )}
                       {reviewEditFields.find((f) => f.name === 'priority') && (
                         <div>
-                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Priority</label>
+                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                            Priority
+                          </label>
                           <div className="flex gap-1.5">
                             {PRIORITY_OPTS.map((opt) => {
                               const selected = resumeValues['priority'] === opt.value;
@@ -522,7 +835,9 @@ export default function WorkflowRunPage() {
                                 <button
                                   key={opt.value}
                                   type="button"
-                                  onClick={() => setResumeValues((p) => ({ ...p, priority: opt.value }))}
+                                  onClick={() =>
+                                    setResumeValues((p) => ({ ...p, priority: opt.value }))
+                                  }
                                   className={`flex-1 rounded-lg border py-1.5 text-xs font-medium transition-all ${
                                     selected
                                       ? opt.active + ' ring-1 ring-current'
@@ -538,18 +853,27 @@ export default function WorkflowRunPage() {
                       )}
                       {reviewEditFields.find((f) => f.name === 'recruiter_notes') && (
                         <div>
-                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">Your Notes</label>
+                          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                            Your Notes
+                          </label>
                           <textarea
                             rows={3}
                             className="w-full resize-none rounded-lg border border-border-light bg-surface-secondary px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-amber-500/40"
                             placeholder="Add observations, context, or override the AI recommendation…"
                             value={resumeValues['recruiter_notes'] ?? ''}
-                            onChange={(e) => setResumeValues((p) => ({ ...p, recruiter_notes: e.target.value }))}
+                            onChange={(e) =>
+                              setResumeValues((p) => ({ ...p, recruiter_notes: e.target.value }))
+                            }
                           />
                         </div>
                       )}
                       {reviewEditFields
-                        .filter((f) => !['final_recommendation', 'priority', 'recruiter_notes'].includes(f.name))
+                        .filter(
+                          (f) =>
+                            !['final_recommendation', 'priority', 'recruiter_notes'].includes(
+                              f.name,
+                            ),
+                        )
                         .map((f) => (
                           <div key={f.name}>
                             <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
@@ -560,24 +884,30 @@ export default function WorkflowRunPage() {
                               <select
                                 className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
                                 value={resumeValues[f.name] ?? ''}
-                                onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                onChange={(e) =>
+                                  setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))
+                                }
                               >
-                                {(f.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                                {(f.options ?? []).map((opt) => (
+                                  <option key={opt} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
                               </select>
                             ) : (
                               <input
                                 type="text"
                                 className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
                                 value={resumeValues[f.name] ?? ''}
-                                onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                onChange={(e) =>
+                                  setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))
+                                }
                                 placeholder={f.placeholder}
                               />
                             )}
                           </div>
                         ))}
-                      {resumeError && (
-                        <p className="text-xs text-red-500">{resumeError}</p>
-                      )}
+                      {resumeError && <p className="text-xs text-red-500">{resumeError}</p>}
                       <button
                         type="submit"
                         disabled={resuming || !resumeValues['final_recommendation']}
@@ -586,32 +916,53 @@ export default function WorkflowRunPage() {
                       >
                         {resuming ? (
                           <>
-                            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-                              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
-                              <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            <svg
+                              className="h-4 w-4 animate-spin"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              aria-hidden
+                            >
+                              <circle
+                                cx="12"
+                                cy="12"
+                                r="10"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                className="opacity-20"
+                              />
+                              <path
+                                fill="currentColor"
+                                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                              />
                             </svg>
                             Submitting…
                           </>
                         ) : (
                           <>
                             Submit Decision
-                            <kbd className="ml-1 rounded bg-amber-400/60 px-1.5 py-0.5 text-xs font-normal">⌘↵</kbd>
+                            <kbd className="ml-1 rounded bg-amber-400/60 px-1.5 py-0.5 text-xs font-normal">
+                              ⌘↵
+                            </kbd>
                           </>
                         )}
                       </button>
                     </form>
                   </div>
                 </div>
-              ) : CustomReview ? (
-                <CustomReview run={run} workflow={workflow} runId={runId!} token={token!} onResumed={() => setStreamKey((k) => k + 1)} />
               ) : (
                 <div className="space-y-6">
                   {specOutput && (
-                    <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
+                    <ReportOutput
+                      output={specOutput}
+                      completedSteps={done}
+                      inputs={run.inputs ?? {}}
+                    />
                   )}
                   {run.pending_prompt && (
                     <div>
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">AI Assessment</p>
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                        AI Assessment
+                      </p>
                       <div className="rounded-2xl border border-border-light bg-surface-primary p-5">
                         <PendingPromptView raw={run.pending_prompt} />
                       </div>
@@ -620,28 +971,47 @@ export default function WorkflowRunPage() {
                   {reviewEditFields.length > 0 && (
                     <div className="space-y-4">
                       {/* Readonly info fields shown as contextual links above the form */}
-                      {reviewAllFields.filter((f) => (f.type as string) === 'readonly').map((f) => {
-                        const val = String(f.default ?? '');
-                        if (!val || val === '—') return null;
-                        const isUrl = /^https?:\/\//.test(val);
-                        return (
-                          <div key={f.name} className="flex items-center gap-3 rounded-xl border border-border-light bg-surface-secondary px-4 py-3">
-                            <svg className="h-4 w-4 shrink-0 text-text-tertiary" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                              <path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" />
-                            </svg>
-                            <div className="min-w-0 flex-1">
-                              <p className="text-xs text-text-tertiary">{f.label}</p>
-                              {isUrl ? (
-                                <a href={val} target="_blank" rel="noopener noreferrer" className="block truncate text-sm text-amber-600 hover:underline dark:text-amber-400">
-                                  {val}
-                                </a>
-                              ) : (
-                                <p className="truncate text-sm text-text-primary">{val}</p>
-                              )}
+                      {reviewAllFields
+                        .filter((f) => (f.type as string) === 'readonly')
+                        .map((f) => {
+                          const val = String(f.default ?? '');
+                          if (!val || val === '—') return null;
+                          const isUrl = /^https?:\/\//.test(val);
+                          return (
+                            <div
+                              key={f.name}
+                              className="flex items-center gap-3 rounded-xl border border-border-light bg-surface-secondary px-4 py-3"
+                            >
+                              <svg
+                                className="h-4 w-4 shrink-0 text-text-tertiary"
+                                viewBox="0 0 20 20"
+                                fill="currentColor"
+                                aria-hidden
+                              >
+                                <path
+                                  fillRule="evenodd"
+                                  d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z"
+                                  clipRule="evenodd"
+                                />
+                              </svg>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs text-text-tertiary">{f.label}</p>
+                                {isUrl ? (
+                                  <a
+                                    href={val}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="block truncate text-sm text-amber-600 hover:underline dark:text-amber-400"
+                                  >
+                                    {val}
+                                  </a>
+                                ) : (
+                                  <p className="truncate text-sm text-text-primary">{val}</p>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
 
                       <div className="rounded-xl border border-border-light bg-surface-primary p-5">
                         <form id="review-gate-form" onSubmit={handleResume} className="space-y-5">
@@ -652,15 +1022,20 @@ export default function WorkflowRunPage() {
                                 <div key={f.name}>
                                   <div className="mb-2 flex items-center justify-between">
                                     <label className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                                      {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                      {f.label}
+                                      {f.required && <span className="ml-1 text-red-500">*</span>}
                                     </label>
-                                    <span className="tabular-nums text-xs text-text-tertiary">{charCount.toLocaleString()} chars</span>
+                                    <span className="text-xs tabular-nums text-text-tertiary">
+                                      {charCount.toLocaleString()} chars
+                                    </span>
                                   </div>
                                   <textarea
                                     rows={10}
                                     className="w-full resize-y rounded-lg border border-border-light bg-surface-secondary px-3 py-3 text-sm leading-relaxed text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-amber-500/40"
                                     value={resumeValues[f.name] ?? ''}
-                                    onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                    onChange={(e) =>
+                                      setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))
+                                    }
                                     placeholder="Edit the post text before publishing…"
                                   />
                                 </div>
@@ -668,36 +1043,45 @@ export default function WorkflowRunPage() {
                             }
 
                             if (f.type === 'select' && (f.options ?? []).length <= 4) {
-                              const DECISION_STYLE: Record<string, { active: string; inactive: string; icon: string }> = {
+                              const DECISION_STYLE: Record<
+                                string,
+                                { active: string; inactive: string; icon: string }
+                              > = {
                                 publish: {
                                   active: 'bg-green-500 border-green-500 text-white shadow-sm',
-                                  inactive: 'border-green-300 text-green-700 bg-green-50 hover:bg-green-100 dark:border-green-700/50 dark:text-green-400 dark:bg-green-900/10 dark:hover:bg-green-900/20',
+                                  inactive:
+                                    'border-green-300 text-green-700 bg-green-50 hover:bg-green-100 dark:border-green-700/50 dark:text-green-400 dark:bg-green-900/10 dark:hover:bg-green-900/20',
                                   icon: '✓',
                                 },
                                 reject: {
                                   active: 'bg-red-500 border-red-500 text-white shadow-sm',
-                                  inactive: 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100 dark:border-red-700/50 dark:text-red-400 dark:bg-red-900/10 dark:hover:bg-red-900/20',
+                                  inactive:
+                                    'border-red-200 text-red-600 bg-red-50 hover:bg-red-100 dark:border-red-700/50 dark:text-red-400 dark:bg-red-900/10 dark:hover:bg-red-900/20',
                                   icon: '✕',
                                 },
                               };
                               return (
                                 <div key={f.name}>
                                   <label className="mb-3 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                                    {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                    {f.label}
+                                    {f.required && <span className="ml-1 text-red-500">*</span>}
                                   </label>
                                   <div className="flex gap-3">
                                     {(f.options ?? []).map((opt) => {
                                       const selected = resumeValues[f.name] === opt;
                                       const style = DECISION_STYLE[opt] ?? {
                                         active: 'bg-amber-500 border-amber-500 text-white',
-                                        inactive: 'border-border-light bg-surface-secondary text-text-secondary hover:text-text-primary',
+                                        inactive:
+                                          'border-border-light bg-surface-secondary text-text-secondary hover:text-text-primary',
                                         icon: '·',
                                       };
                                       return (
                                         <button
                                           key={opt}
                                           type="button"
-                                          onClick={() => setResumeValues((p) => ({ ...p, [f.name]: opt }))}
+                                          onClick={() =>
+                                            setResumeValues((p) => ({ ...p, [f.name]: opt }))
+                                          }
                                           className={`flex flex-1 items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-all ${selected ? style.active : style.inactive}`}
                                         >
                                           <span>{style.icon}</span>
@@ -713,13 +1097,16 @@ export default function WorkflowRunPage() {
                             return (
                               <div key={f.name}>
                                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                                  {f.label}{f.required && <span className="ml-1 text-red-500">*</span>}
+                                  {f.label}
+                                  {f.required && <span className="ml-1 text-red-500">*</span>}
                                 </label>
                                 <input
                                   type="text"
                                   className="w-full rounded-lg border border-border-light bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
                                   value={resumeValues[f.name] ?? ''}
-                                  onChange={(e) => setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))}
+                                  onChange={(e) =>
+                                    setResumeValues((p) => ({ ...p, [f.name]: e.target.value }))
+                                  }
                                   placeholder={f.placeholder}
                                 />
                               </div>
@@ -731,11 +1118,12 @@ export default function WorkflowRunPage() {
                             const hasRequiredSelects = reviewEditFields
                               .filter((f) => f.type === 'select' && f.required)
                               .every((f) => !!resumeValues[f.name]);
-                            const btnCls = decision === 'publish'
-                              ? 'bg-green-500 hover:bg-green-600'
-                              : decision === 'reject'
-                                ? 'bg-red-500 hover:bg-red-600'
-                                : 'bg-amber-500 hover:bg-amber-600';
+                            const btnCls =
+                              decision === 'publish'
+                                ? 'bg-green-500 hover:bg-green-600'
+                                : decision === 'reject'
+                                  ? 'bg-red-500 hover:bg-red-600'
+                                  : 'bg-amber-500 hover:bg-amber-600';
                             return (
                               <button
                                 type="submit"
@@ -745,14 +1133,34 @@ export default function WorkflowRunPage() {
                               >
                                 {resuming ? (
                                   <>
-                                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-                                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
-                                      <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                    <svg
+                                      className="h-4 w-4 animate-spin"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      aria-hidden
+                                    >
+                                      <circle
+                                        cx="12"
+                                        cy="12"
+                                        r="10"
+                                        stroke="currentColor"
+                                        strokeWidth="2.5"
+                                        className="opacity-20"
+                                      />
+                                      <path
+                                        fill="currentColor"
+                                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                                      />
                                     </svg>
                                     Submitting…
                                   </>
                                 ) : decision === 'publish' ? (
-                                  <>Publish Post <kbd className="ml-1 rounded bg-green-400/60 px-1.5 py-0.5 text-xs font-normal">⌘↵</kbd></>
+                                  <>
+                                    Publish Post{' '}
+                                    <kbd className="ml-1 rounded bg-green-400/60 px-1.5 py-0.5 text-xs font-normal">
+                                      ⌘↵
+                                    </kbd>
+                                  </>
                                 ) : decision === 'reject' ? (
                                   'Reject'
                                 ) : (
@@ -772,11 +1180,25 @@ export default function WorkflowRunPage() {
         )}
 
         {/* Failed */}
-        {run.status === 'failed' && (
+        {run.status === 'failed' && runId && (
           <div className="p-6 lg:p-8">
-            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
-              {run.error_message ?? 'The run failed without an error message.'}
-            </div>
+            <WorkflowFailedRecovery
+              runId={runId}
+              token={token ?? undefined}
+              errorMessage={run.error_message}
+              onRecovered={() => {
+                if (token) {
+                  void fetch(`/api/aivion/workflow/runs/${runId}`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                  })
+                    .then((r) => (r.ok ? r.json() : null))
+                    .then((data: WorkflowRun | null) => {
+                      if (data) setRun((prev) => (prev ? { ...prev, ...data } : data));
+                    });
+                }
+                setStreamKey((k) => k + 1);
+              }}
+            />
           </div>
         )}
 
@@ -786,8 +1208,17 @@ export default function WorkflowRunPage() {
             {/* Completion banner */}
             <div className="mb-4 flex items-center gap-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 dark:border-green-700/40 dark:bg-green-900/20">
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-green-100 dark:bg-green-800/40">
-                <svg className="h-4 w-4 text-green-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                <svg
+                  className="h-4 w-4 text-green-600"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                    clipRule="evenodd"
+                  />
                 </svg>
               </span>
               <div>
@@ -802,6 +1233,18 @@ export default function WorkflowRunPage() {
               </div>
             </div>
 
+            <WorkflowArtifactActions
+              artifacts={completedArtifacts}
+              runId={runId ?? ''}
+              stepLabelMap={stepLabelMap}
+            />
+
+            {completedTimelineItems.length > 0 && (
+              <div className="mb-6">
+                <CompletedRunTimeline items={completedTimelineItems} />
+              </div>
+            )}
+
             {reviewDisplay && reviewAllFields.length > 0 && !isCandidateReview ? (
               <div className="space-y-4">
                 {/* Row 1: Profile + AI Assessment */}
@@ -811,7 +1254,9 @@ export default function WorkflowRunPage() {
                       <div className="mb-4 flex items-center gap-3">
                         {entityName && (
                           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                            <span className="text-base font-bold text-amber-700 dark:text-amber-300">{entityInitials}</span>
+                            <span className="text-base font-bold text-amber-700 dark:text-amber-300">
+                              {entityInitials}
+                            </span>
                           </div>
                         )}
                         <p className="text-xs font-semibold uppercase tracking-wider text-text-tertiary">
@@ -820,13 +1265,16 @@ export default function WorkflowRunPage() {
                       </div>
                       <div className="space-y-3">
                         {reviewDisplay.profile_fields!.map((key) => {
-                          const value = roFields[key] && roFields[key] !== '—'
-                            ? roFields[key]
-                            : String(run.inputs?.[key] ?? '');
+                          const value =
+                            roFields[key] && roFields[key] !== '—'
+                              ? roFields[key]
+                              : String(run.inputs?.[key] ?? '');
                           return value ? (
                             <div key={key}>
                               <p className="text-xs text-text-tertiary">{fieldLabel(key)}</p>
-                              <p className="mt-0.5 text-sm font-medium text-text-primary">{value}</p>
+                              <p className="mt-0.5 text-sm font-medium text-text-primary">
+                                {value}
+                              </p>
                             </div>
                           ) : null;
                         })}
@@ -839,24 +1287,32 @@ export default function WorkflowRunPage() {
                         {reviewDisplay.assessment_label ?? 'AI Assessment'}
                       </p>
                       <div className="flex items-start gap-4">
-                        {reviewDisplay.score_field && roFields[reviewDisplay.score_field] && roFields[reviewDisplay.score_field] !== '—' && (
-                          <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} />
-                        )}
+                        {reviewDisplay.score_field &&
+                          roFields[reviewDisplay.score_field] &&
+                          roFields[reviewDisplay.score_field] !== '—' && (
+                            <FitScoreRing score={parseFloat(roFields[reviewDisplay.score_field])} />
+                          )}
                         <div className="min-w-0 flex-1 space-y-1.5">
-                          {reviewDisplay.assessment_fields!
-                            .filter((key) => key !== reviewDisplay.score_field)
+                          {reviewDisplay
+                            .assessment_fields!.filter((key) => key !== reviewDisplay.score_field)
                             .map((key, idx) => {
                               const value = roFields[key];
                               if (!value || value === '—') return null;
                               if (idx > 0 && !assessmentExpanded) return null;
                               return (
-                                <p key={key} className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}>
+                                <p
+                                  key={key}
+                                  className={`text-sm ${idx === 0 ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}
+                                >
                                   {value}
                                 </p>
                               );
                             })}
                           {reviewDisplay.assessment_fields!.filter(
-                            (key) => key !== reviewDisplay.score_field && roFields[key] && roFields[key] !== '—',
+                            (key) =>
+                              key !== reviewDisplay.score_field &&
+                              roFields[key] &&
+                              roFields[key] !== '—',
                           ).length > 1 && (
                             <button
                               type="button"
@@ -873,32 +1329,43 @@ export default function WorkflowRunPage() {
                 </div>
 
                 {/* Row 2: Tag groups */}
-                {(reviewDisplay.tag_groups?.length ?? 0) > 0 && (() => {
-                  const activeGroups = reviewDisplay.tag_groups!.filter(
-                    (g) => splitDots(roFields[g.field] ?? '').length > 0,
-                  );
-                  if (!activeGroups.length) return null;
-                  return (
-                    <div className="flex gap-4">
-                      {activeGroups.map((group) => {
-                        const items = splitDots(roFields[group.field] ?? '');
-                        const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
-                        return (
-                          <div key={group.field} className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}>
-                            <p className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}>
-                              {group.label}
-                            </p>
-                            <div className="flex flex-wrap gap-1.5">
-                              {items.map((item, i) => (
-                                <span key={i} className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}>{item}</span>
-                              ))}
+                {(reviewDisplay.tag_groups?.length ?? 0) > 0 &&
+                  (() => {
+                    const activeGroups = reviewDisplay.tag_groups!.filter(
+                      (g) => splitDots(roFields[g.field] ?? '').length > 0,
+                    );
+                    if (!activeGroups.length) return null;
+                    return (
+                      <div className="flex gap-4">
+                        {activeGroups.map((group) => {
+                          const items = splitDots(roFields[group.field] ?? '');
+                          const cls = TAG_COLOR_CLASSES[group.color] ?? TAG_COLOR_CLASSES.gray;
+                          return (
+                            <div
+                              key={group.field}
+                              className={`flex-1 rounded-xl border ${cls.border} ${cls.bg} p-4`}
+                            >
+                              <p
+                                className={`mb-2.5 text-xs font-semibold uppercase tracking-wider ${cls.title}`}
+                              >
+                                {group.label}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {items.map((item, i) => (
+                                  <span
+                                    key={i}
+                                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${cls.chip}`}
+                                  >
+                                    {item}
+                                  </span>
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
 
                 {/* Row 3: Decision made (read-only) */}
                 {(() => {
@@ -915,7 +1382,9 @@ export default function WorkflowRunPage() {
                       <div className="space-y-3">
                         {rec && (
                           <div className="flex items-center gap-3">
-                            <span className="text-xs text-text-secondary w-20 shrink-0">Decision</span>
+                            <span className="w-20 shrink-0 text-xs text-text-secondary">
+                              Decision
+                            </span>
                             <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700 dark:bg-green-800/30 dark:text-green-300">
                               {REC_LABELS[rec] ?? rec.replace(/_/g, ' ')}
                             </span>
@@ -923,14 +1392,20 @@ export default function WorkflowRunPage() {
                         )}
                         {priority && (
                           <div className="flex items-center gap-3">
-                            <span className="text-xs text-text-secondary w-20 shrink-0">Priority</span>
-                            <span className="text-sm font-medium text-text-primary capitalize">{priority}</span>
+                            <span className="w-20 shrink-0 text-xs text-text-secondary">
+                              Priority
+                            </span>
+                            <span className="text-sm font-medium capitalize text-text-primary">
+                              {priority}
+                            </span>
                           </div>
                         )}
                         {notes && (
                           <div>
                             <span className="text-xs text-text-secondary">Notes</span>
-                            <p className="mt-1 text-sm text-text-primary whitespace-pre-wrap">{notes}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-text-primary">
+                              {notes}
+                            </p>
                           </div>
                         )}
                       </div>
@@ -939,11 +1414,24 @@ export default function WorkflowRunPage() {
                 })()}
               </div>
             ) : CustomReview ? (
-              <CustomReview run={run} workflow={workflow} runId={runId!} token={token!} onResumed={() => setStreamKey((k) => k + 1)} />
+              <CustomReview
+                run={run}
+                workflow={workflow}
+                runId={runId!}
+                token={token!}
+                onResumed={() => void refreshRunSnapshot()}
+                onRunUpdated={refreshRunSnapshot}
+              />
             ) : specOutput ? (
-              <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
+              <div className="space-y-6">
+                <ReportOutput output={specOutput} completedSteps={done} inputs={run.inputs ?? {}} />
+              </div>
+            ) : completedArtifacts.length > 0 ? (
+              <div className="space-y-6" />
             ) : run.outputs && Object.keys(run.outputs).some((k) => k !== '_completed_steps') ? (
-              <ResultFallback outputs={run.outputs as Record<string, unknown>} />
+              <div className="space-y-6">
+                <ResultFallback outputs={run.outputs as Record<string, unknown>} />
+              </div>
             ) : null}
           </div>
         )}

@@ -7,15 +7,17 @@ const STEP_BADGE: Record<string, string> = {
   llm: 'AI',
   file_extract: 'Extract',
   user_input: 'Review Gate',
+  draft_articles: 'Draft',
+  revise_articles: 'Revise',
+  package_publication: 'Package',
+  publish_publication_http: 'Dispatch',
   integration: 'Integration',
   loop: 'Loop',
   template: 'Template',
 };
 
 function visibleSteps(workflow: Workflow) {
-  return (workflow.spec.steps ?? []).filter(
-    (s) => s.type !== 'scrub' && s.type !== 'unscrub',
-  );
+  return (workflow.spec.steps ?? []).filter((s) => s.type !== 'scrub' && s.type !== 'unscrub');
 }
 
 export default function WorkflowList() {
@@ -48,7 +50,7 @@ export default function WorkflowList() {
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center text-text-secondary text-sm">
+      <div className="flex h-full items-center justify-center text-sm text-text-secondary">
         {error}
       </div>
     );
@@ -58,7 +60,9 @@ export default function WorkflowList() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
         <p className="text-base font-semibold text-text-primary">No workflows assigned</p>
-        <p className="text-sm text-text-secondary">Contact your administrator to get access to workflows.</p>
+        <p className="text-sm text-text-secondary">
+          Contact your administrator to get access to workflows.
+        </p>
       </div>
     );
   }
@@ -85,7 +89,13 @@ export default function WorkflowList() {
               <div className="flex items-start justify-between gap-2">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
-                    <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <path
+                      d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </div>
                 {wf.category && (
@@ -124,8 +134,19 @@ export default function WorkflowList() {
 
       {workflows.some((w) => w.is_runnable === false) && (
         <div className="mt-6 flex items-center gap-2 text-sm text-text-secondary">
-          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" className="shrink-0 text-amber-500" aria-hidden>
-            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            className="shrink-0 text-amber-500"
+            aria-hidden
+          >
+            <path
+              fillRule="evenodd"
+              d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z"
+              clipRule="evenodd"
+            />
           </svg>
           Some workflows need service connections.{' '}
           <Link to="/connections" className="font-medium text-amber-600 hover:underline">

@@ -245,10 +245,16 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     throw new Error('Agent not found');
   }
 
-  // Inject workflow-type-specific Bifrost prompt when the chat route resolved one.
-  // This overrides the agent's static additional_instructions for this request only.
+  // Inject workflow-page context when the chat route resolved one.
+  // Append it to any existing additional_instructions so the base agent prompt
+  // still applies for every request.
   if (req.workflowInstructions) {
-    primaryAgent.additional_instructions = req.workflowInstructions;
+    primaryAgent.additional_instructions = [
+      primaryAgent.additional_instructions ?? '',
+      req.workflowInstructions,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   // Override the agent's model when the user has selected a different one from the panel.

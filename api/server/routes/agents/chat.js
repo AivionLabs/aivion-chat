@@ -34,15 +34,19 @@ router.use(buildEndpointOption);
 
 const ALLOWED_WORKFLOW_MODELS = ['aivion-free', 'aivion-quick', 'aivion-mid', 'aivion-pro'];
 
-// Workflow-type-specific system prompt injection.
-// If the request carries a workflow_id, resolve its slug via aivion-workflow,
-// then load the matching "workflow-{slug}" prompt from Bifrost and attach it
-// to req so the agent initializer can inject it as additional_instructions.
+// Workflow-specific context injection.
+// If the request carries a workflow_id, resolve a short context note for the
+// workflow page and attach it to req so the agent initializer can append it as
+// additional_instructions.
 // workflow_model (optional) overrides the agent's default model for this request.
 router.use(async (req, _res, next) => {
   const workflowId = req.body?.workflow_id;
   if (workflowId) {
-    req.workflowInstructions = await loadWorkflowPrompt(workflowId);
+    const userId = req.user?.openidId || req.user?.id;
+    req.workflowInstructions = await loadWorkflowPrompt(workflowId, {
+      userId,
+      runId: req.body?.run_id || undefined,
+    });
   }
   const workflowModel = req.body?.workflow_model;
   if (workflowModel && ALLOWED_WORKFLOW_MODELS.includes(workflowModel)) {
